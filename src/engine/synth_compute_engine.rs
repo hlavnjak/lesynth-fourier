@@ -403,7 +403,7 @@ impl SynthComputeEngine {
                         0.0
                     };
                     sample += amp
-                        * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + phase).cos();
+                        * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + phase).sin();
                 }
                 sound.push(sample.clamp(-1.0, 1.0));
             }
