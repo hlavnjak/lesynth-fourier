@@ -286,7 +286,6 @@ impl Plugin for LeSynth {
                             });
 
                         ui.add_space(15.0);
-                        ui.separator();
                         ui.add_space(30.0);
 
                         let input = ui.input(|i| i.clone());
