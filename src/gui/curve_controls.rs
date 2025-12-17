@@ -255,7 +255,7 @@ pub fn draw_curve_controls(
                     param.value() as f64
                 }
             })
-            .text("Wobble Amp")
+            .suffix(" Wobble Amp.")
             .fixed_decimals(3);
             
             let response = cols[5].add(slider);
@@ -289,7 +289,7 @@ pub fn draw_curve_controls(
                     param.value() as f64
                 }
             })
-            .text("Wobble Freq")
+            .suffix(" Wobble Fq.")
             .fixed_decimals(1);
             
             let response = cols[6].add(slider);
