@@ -42,4 +42,12 @@ pub struct HarmonicParam {
     pub granularity_amp: EnumParam<GranularityLevel>,
     #[id = "granularity_phase"]
     pub granularity_phase: EnumParam<GranularityLevel>,
+    #[id = "wobble_amp_amp"]
+    pub wobble_amp_amp: FloatParam,
+    #[id = "wobble_freq_amp"]
+    pub wobble_freq_amp: FloatParam,
+    #[id = "wobble_amp_phase"]
+    pub wobble_amp_phase: FloatParam,
+    #[id = "wobble_freq_phase"]
+    pub wobble_freq_phase: FloatParam,
 }

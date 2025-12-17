@@ -57,6 +57,11 @@ impl Default for LeSynthParams {
         let ab_range = FloatRange::Linear { min: 0.0, max: 1.0 };
         let b_range = FloatRange::Linear { min: 0.0, max: 0.35 };
 
+        let default_wobble_amp = 0.0;
+        let default_wobble_freq = 50.0;
+        let wobble_amp_range = FloatRange::Linear { min: 0.0, max: 0.2 };
+        let wobble_freq_range = FloatRange::Linear { min: 10.0, max: 200.0 };
+
         let harmonics = std::array::from_fn(|i| {
             let idx = i + 1;
             HarmonicParam {
@@ -105,6 +110,26 @@ impl Default for LeSynthParams {
                 granularity_phase: EnumParam::new(
                     &format!("Harmonic {} Granularity For Phase", idx),
                     GranularityLevel::default(),
+                ),
+                wobble_amp_amp: FloatParam::new(
+                    &format!("Harmonic {} Wobble Amplitude For Amplitude", idx),
+                    default_wobble_amp,
+                    wobble_amp_range,
+                ),
+                wobble_freq_amp: FloatParam::new(
+                    &format!("Harmonic {} Wobble Frequency For Amplitude", idx),
+                    default_wobble_freq,
+                    wobble_freq_range,
+                ),
+                wobble_amp_phase: FloatParam::new(
+                    &format!("Harmonic {} Wobble Amplitude For Phase", idx),
+                    default_wobble_amp,
+                    wobble_amp_range,
+                ),
+                wobble_freq_phase: FloatParam::new(
+                    &format!("Harmonic {} Wobble Frequency For Phase", idx),
+                    default_wobble_freq,
+                    wobble_freq_range,
                 ),
             }
         });

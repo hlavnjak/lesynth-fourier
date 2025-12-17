@@ -31,14 +31,16 @@ pub fn draw_curve_controls(
     sine_amp_min: f64,
     sine_amp_max: f64,
 ) {
-    ui.columns(5, |cols| {
-        let (offset, a, b, curve, granularity) = match chart_type {
+    ui.columns(7, |cols| {
+        let (offset, a, b, curve, granularity, wobble_amp, wobble_freq) = match chart_type {
             ChartType::Amp => (
                 &harmonic.curve_offset_amp,
                 &harmonic.sine_curve_amp_amp,
                 &harmonic.sine_curve_freq_amp,
                 &harmonic.curve_type_amp,
                 &harmonic.granularity_amp,
+                &harmonic.wobble_amp_amp,
+                &harmonic.wobble_freq_amp,
             ),
             ChartType::Phase => (
                 &harmonic.curve_offset_phase,
@@ -46,6 +48,8 @@ pub fn draw_curve_controls(
                 &harmonic.sine_curve_freq_phase,
                 &harmonic.curve_type_phase,
                 &harmonic.granularity_phase,
+                &harmonic.wobble_amp_phase,
+                &harmonic.wobble_freq_phase,
             ),
         };
 
@@ -235,5 +239,73 @@ pub fn draw_curve_controls(
                     }
                 });
         });
+
+        // Column 5: Wobble Amplitude
+        {
+            let param = wobble_amp;
+            let engine = synth_compute_engine.clone();
+            let chart_type_clone = chart_type.clone();
+            let slider = nih_plug_egui::egui::Slider::from_get_set(0.0..=0.2, move |new_val| {
+                if let Some(v) = new_val {
+                    setter.begin_set_parameter(param);
+                    setter.set_parameter(param, v as f32);
+                    setter.end_set_parameter(param);
+                    v as f64
+                } else {
+                    param.value() as f64
+                }
+            })
+            .text("Wobble Amp")
+            .fixed_decimals(3);
+            
+            let response = cols[5].add(slider);
+            if response.drag_stopped() {
+                match curve.value() {
+                    CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
+                    CurveType::Constant => {
+                        let offset_value = match chart_type {
+                            ChartType::Amp => offset.value(),
+                            ChartType::Phase => offset.value(),
+                        };
+                        engine.fill_constant_curve(idx, offset_value, chart_type_clone.clone());
+                    }
+                }
+                params_changed_action();
+            }
+        }
+
+        // Column 6: Wobble Frequency
+        {
+            let param = wobble_freq;
+            let engine = synth_compute_engine.clone();
+            let chart_type_clone = chart_type.clone();
+            let slider = nih_plug_egui::egui::Slider::from_get_set(10.0..=200.0, move |new_val| {
+                if let Some(vf) = new_val {
+                    setter.begin_set_parameter(param);
+                    setter.set_parameter(param, vf as f32);
+                    setter.end_set_parameter(param);
+                    vf as f64
+                } else {
+                    param.value() as f64
+                }
+            })
+            .text("Wobble Freq")
+            .fixed_decimals(1);
+            
+            let response = cols[6].add(slider);
+            if response.drag_stopped() {
+                match curve.value() {
+                    CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
+                    CurveType::Constant => {
+                        let offset_value = match chart_type {
+                            ChartType::Amp => offset.value(),
+                            ChartType::Phase => offset.value(),
+                        };
+                        engine.fill_constant_curve(idx, offset_value, chart_type_clone.clone());
+                    }
+                }
+                params_changed_action();
+            }
+        }
     });
 }
