@@ -22,7 +22,7 @@ use nih_plug_egui::{
 
 use crate::constants::*;
 use crate::engine::{ChartType, SynthComputeEngine};
-use crate::gui::{draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_piano_keyboard};
+use crate::gui::{draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_piano_keyboard, draw_metallic_background};
 use crate::params::LeSynthParams;
 use crate::voice::Voice;
 
@@ -219,6 +219,9 @@ impl Plugin for LeSynth {
                         .get_temp_mut_or_insert_with(last_key_id_persist, || Some(15));
                 });
                 egui::CentralPanel::default().show(egui_ctx, |ui| {
+                        // Draw metallic background
+                        draw_metallic_background(ui, ui.available_rect_before_wrap());
+                        
                         let params_changed_action = || {
                             synth_compute_engine.set_normalization_needed(true);
 

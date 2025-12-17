@@ -16,8 +16,10 @@ pub mod piano_keyboard;
 pub mod harmonic_plot;
 pub mod assembled_chart;
 pub mod curve_controls;
+pub mod metallic_background;
 
 pub use piano_keyboard::draw_piano_keyboard;
 pub use harmonic_plot::draw_harmonic_plot;
 pub use assembled_chart::draw_assembled_chart;
 pub use curve_controls::draw_curve_controls;
+pub use metallic_background::draw_metallic_background;
