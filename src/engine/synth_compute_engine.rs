@@ -42,14 +42,33 @@ impl SynthComputeEngine {
     }
 
     pub fn fill_constant_curve(&self, n: usize, value: f32, chart_type: ChartType) {
+        let wobble_amp = match chart_type {
+            ChartType::Amp => self.synth_params.harmonics[n].wobble_amp_amp.value(),
+            ChartType::Phase => self.synth_params.harmonics[n].wobble_amp_phase.value(),
+        };
+        let wobble_freq = match chart_type {
+            ChartType::Amp => self.synth_params.harmonics[n].wobble_freq_amp.value(),
+            ChartType::Phase => self.synth_params.harmonics[n].wobble_freq_phase.value(),
+        };
+
         let mut data = match chart_type {
             ChartType::Amp => self.shared_params.amplitude_data.lock().unwrap(),
             ChartType::Phase => self.shared_params.phase_data.lock().unwrap(),
         };
-        // TODO probably remove this condition?
-        if data[n][0] != value {
+        
+        let needs_update = data[n][0] != value || wobble_amp > 0.0;
+        if needs_update {
             for bucket in 0..data[n].len() {
-                data[n][bucket] = value;
+                let wobble = if wobble_amp > 0.0 {
+                    wobble_amp * (wobble_freq * bucket as f32 * 0.01).sin()
+                } else {
+                    0.0
+                };
+                let final_value = match chart_type {
+                    ChartType::Amp => (value + wobble).clamp(0.0, 1.0),
+                    ChartType::Phase => value + wobble,
+                };
+                data[n][bucket] = final_value;
             }
             self.set_normalization_needed(true);
             // Mark all buffers as dirty since harmonic parameters changed
@@ -73,15 +92,30 @@ impl SynthComputeEngine {
             ChartType::Amp => self.synth_params.harmonics[n].curve_offset_amp.value(),
             ChartType::Phase => self.synth_params.harmonics[n].curve_offset_phase.value(),
         };
+        let wobble_amp = match chart_type {
+            ChartType::Amp => self.synth_params.harmonics[n].wobble_amp_amp.value(),
+            ChartType::Phase => self.synth_params.harmonics[n].wobble_amp_phase.value(),
+        };
+        let wobble_freq = match chart_type {
+            ChartType::Amp => self.synth_params.harmonics[n].wobble_freq_amp.value(),
+            ChartType::Phase => self.synth_params.harmonics[n].wobble_freq_phase.value(),
+        };
 
         let mut data = match chart_type {
             ChartType::Amp => self.shared_params.amplitude_data.lock().unwrap(),
             ChartType::Phase => self.shared_params.phase_data.lock().unwrap(),
         };
         for bucket in 0..data[n].len() {
-            // compute and clamp
             let raw = a * (b as f32 * bucket as f32).sin();
-            let val = (raw + amp_off).clamp(0.0, 1.0);
+            let wobble = if wobble_amp > 0.0 {
+                wobble_amp * (wobble_freq * bucket as f32 * 0.01).sin()
+            } else {
+                0.0
+            };
+            let val = match chart_type {
+                ChartType::Amp => (raw + amp_off + wobble).clamp(0.0, 1.0),
+                ChartType::Phase => raw + amp_off + wobble,
+            };
             data[n][bucket] = val;
         }
         self.set_normalization_needed(true);
@@ -146,7 +180,7 @@ impl SynthComputeEngine {
                         0.0
                     };
                     sample += amp
-                        * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + phase).cos();
+                        * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + phase).sin();
                 }
                 sound.push(sample.clamp(-1.0, 1.0));
             }
@@ -369,7 +403,7 @@ impl SynthComputeEngine {
                         0.0
                     };
                     sample += amp
-                        * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + phase).cos();
+                        * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + phase).sin();
                 }
                 sound.push(sample.clamp(-1.0, 1.0));
             }
