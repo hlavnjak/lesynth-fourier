@@ -214,6 +214,8 @@ pub fn draw_curve_controls(
             let granularity_combo_id = format!("{:?}_granularity_combo_{}", chart_type, idx);
             nih_plug_egui::egui::ComboBox::from_id_salt(granularity_combo_id)
                 .selected_text(match granularity.value() {
+                    GranularityLevel::UltraLow => "Max: 0.025",
+                    GranularityLevel::VeryLow => "Max: 0.05",
                     GranularityLevel::Low => "Max: 0.1",
                     GranularityLevel::Medium => "Max: 0.5", 
                     GranularityLevel::High => "Max: 1.0",
@@ -224,6 +226,8 @@ pub fn draw_curve_controls(
                             .selectable_label(
                                 granularity.value() == variant,
                                 match variant {
+                                    GranularityLevel::UltraLow => "Max: 0.025",
+                                    GranularityLevel::VeryLow => "Max: 0.05",
                                     GranularityLevel::Low => "Max: 0.1",
                                     GranularityLevel::Medium => "Max: 0.5", 
                                     GranularityLevel::High => "Max: 1.0",

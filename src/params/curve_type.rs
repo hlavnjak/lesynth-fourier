@@ -30,6 +30,10 @@ impl CurveType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Enum)]
 pub enum GranularityLevel {
+    #[name = "0.025"]
+    UltraLow,
+    #[name = "0.05"]
+    VeryLow,
     #[name = "0.1"]
     Low,
     #[name = "0.5"] 
@@ -39,7 +43,9 @@ pub enum GranularityLevel {
 }
 
 impl GranularityLevel {
-    pub const VARIANTS: [GranularityLevel; 3] = [
+    pub const VARIANTS: [GranularityLevel; 5] = [
+        GranularityLevel::UltraLow,
+        GranularityLevel::VeryLow,
         GranularityLevel::Low,
         GranularityLevel::Medium,
         GranularityLevel::High,
@@ -47,6 +53,8 @@ impl GranularityLevel {
 
     pub fn as_f64(&self) -> f64 {
         match self {
+            GranularityLevel::UltraLow => 0.025,
+            GranularityLevel::VeryLow => 0.05,
             GranularityLevel::Low => 0.1,
             GranularityLevel::Medium => 0.5,
             GranularityLevel::High => 1.0,
@@ -97,18 +105,24 @@ mod tests {
 
     #[test]
     fn test_granularity_level_variants() {
-        assert_eq!(GranularityLevel::VARIANTS.len(), 3);
-        assert_eq!(GranularityLevel::VARIANTS[0], GranularityLevel::Low);
-        assert_eq!(GranularityLevel::VARIANTS[1], GranularityLevel::Medium);
-        assert_eq!(GranularityLevel::VARIANTS[2], GranularityLevel::High);
+        assert_eq!(GranularityLevel::VARIANTS.len(), 5);
+        assert_eq!(GranularityLevel::VARIANTS[0], GranularityLevel::UltraLow);
+        assert_eq!(GranularityLevel::VARIANTS[1], GranularityLevel::VeryLow);
+        assert_eq!(GranularityLevel::VARIANTS[2], GranularityLevel::Low);
+        assert_eq!(GranularityLevel::VARIANTS[3], GranularityLevel::Medium);
+        assert_eq!(GranularityLevel::VARIANTS[4], GranularityLevel::High);
     }
 
     #[test]
     fn test_granularity_level_values() {
+        assert_eq!(GranularityLevel::UltraLow.as_f64(), 0.025);
+        assert_eq!(GranularityLevel::VeryLow.as_f64(), 0.05);
         assert_eq!(GranularityLevel::Low.as_f64(), 0.1);
         assert_eq!(GranularityLevel::Medium.as_f64(), 0.5);
         assert_eq!(GranularityLevel::High.as_f64(), 1.0);
         
+        assert_eq!(GranularityLevel::UltraLow.as_f32(), 0.025);
+        assert_eq!(GranularityLevel::VeryLow.as_f32(), 0.05);
         assert_eq!(GranularityLevel::Low.as_f32(), 0.1);
         assert_eq!(GranularityLevel::Medium.as_f32(), 0.5);
         assert_eq!(GranularityLevel::High.as_f32(), 1.0);
