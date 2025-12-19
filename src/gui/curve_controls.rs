@@ -177,8 +177,78 @@ pub fn draw_curve_controls(
                 });
         }
 
-        // Column 4: Enable Checkbox & Granularity
-        cols[4].vertical(|ui| {
+        // Column 4: Wobble Amplitude
+        {
+            let param = wobble_amp;
+            let engine = synth_compute_engine.clone();
+            let chart_type_clone = chart_type.clone();
+            let granularity_max = granularity.value().as_f64();
+            let wobble_max = granularity_max.min(0.2);
+            let slider = nih_plug_egui::egui::Slider::from_get_set(0.0..=wobble_max, move |new_val| {
+                if let Some(v) = new_val {
+                    setter.begin_set_parameter(param);
+                    setter.set_parameter(param, v as f32);
+                    setter.end_set_parameter(param);
+                    v as f64
+                } else {
+                    param.value() as f64
+                }
+            })
+            .suffix(" Wobble Amp.")
+            .fixed_decimals(3);
+            
+            let response = cols[4].add(slider);
+            if response.drag_stopped() {
+                match curve.value() {
+                    CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
+                    CurveType::Constant => {
+                        let offset_value = match chart_type {
+                            ChartType::Amp => offset.value(),
+                            ChartType::Phase => offset.value(),
+                        };
+                        engine.fill_constant_curve(idx, offset_value, chart_type_clone.clone());
+                    }
+                }
+                params_changed_action();
+            }
+        }
+
+        // Column 5: Wobble Frequency
+        {
+            let param = wobble_freq;
+            let engine = synth_compute_engine.clone();
+            let chart_type_clone = chart_type.clone();
+            let slider = nih_plug_egui::egui::Slider::from_get_set(10.0..=200.0, move |new_val| {
+                if let Some(vf) = new_val {
+                    setter.begin_set_parameter(param);
+                    setter.set_parameter(param, vf as f32);
+                    setter.end_set_parameter(param);
+                    vf as f64
+                } else {
+                    param.value() as f64
+                }
+            })
+            .suffix(" Wobble Fq.")
+            .fixed_decimals(1);
+            
+            let response = cols[5].add(slider);
+            if response.drag_stopped() {
+                match curve.value() {
+                    CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
+                    CurveType::Constant => {
+                        let offset_value = match chart_type {
+                            ChartType::Amp => offset.value(),
+                            ChartType::Phase => offset.value(),
+                        };
+                        engine.fill_constant_curve(idx, offset_value, chart_type_clone.clone());
+                    }
+                }
+                params_changed_action();
+            }
+        }
+
+        // Column 6: Enable Checkbox & Granularity
+        cols[6].vertical(|ui| {
             // Enable Checkbox
             let new_enabled = {
                 let mut enabled = match chart_type {
@@ -243,73 +313,5 @@ pub fn draw_curve_controls(
                     }
                 });
         });
-
-        // Column 5: Wobble Amplitude
-        {
-            let param = wobble_amp;
-            let engine = synth_compute_engine.clone();
-            let chart_type_clone = chart_type.clone();
-            let slider = nih_plug_egui::egui::Slider::from_get_set(0.0..=0.2, move |new_val| {
-                if let Some(v) = new_val {
-                    setter.begin_set_parameter(param);
-                    setter.set_parameter(param, v as f32);
-                    setter.end_set_parameter(param);
-                    v as f64
-                } else {
-                    param.value() as f64
-                }
-            })
-            .suffix(" Wobble Amp.")
-            .fixed_decimals(3);
-            
-            let response = cols[5].add(slider);
-            if response.drag_stopped() {
-                match curve.value() {
-                    CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
-                    CurveType::Constant => {
-                        let offset_value = match chart_type {
-                            ChartType::Amp => offset.value(),
-                            ChartType::Phase => offset.value(),
-                        };
-                        engine.fill_constant_curve(idx, offset_value, chart_type_clone.clone());
-                    }
-                }
-                params_changed_action();
-            }
-        }
-
-        // Column 6: Wobble Frequency
-        {
-            let param = wobble_freq;
-            let engine = synth_compute_engine.clone();
-            let chart_type_clone = chart_type.clone();
-            let slider = nih_plug_egui::egui::Slider::from_get_set(10.0..=200.0, move |new_val| {
-                if let Some(vf) = new_val {
-                    setter.begin_set_parameter(param);
-                    setter.set_parameter(param, vf as f32);
-                    setter.end_set_parameter(param);
-                    vf as f64
-                } else {
-                    param.value() as f64
-                }
-            })
-            .suffix(" Wobble Fq.")
-            .fixed_decimals(1);
-            
-            let response = cols[6].add(slider);
-            if response.drag_stopped() {
-                match curve.value() {
-                    CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
-                    CurveType::Constant => {
-                        let offset_value = match chart_type {
-                            ChartType::Amp => offset.value(),
-                            ChartType::Phase => offset.value(),
-                        };
-                        engine.fill_constant_curve(idx, offset_value, chart_type_clone.clone());
-                    }
-                }
-                params_changed_action();
-            }
-        }
     });
 }
