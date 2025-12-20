@@ -48,7 +48,7 @@ impl Plugin for LeSynth {
     const VENDOR: &'static str = "Jakub Hlavnicka";
     const URL: &'static str = "https://donothaveany.com";
     const EMAIL: &'static str = "hlavnickajakub@gmail.com";
-    const VERSION: &'static str = "1.1.0";
+    const VERSION: &'static str = "1.2.0";
     const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
@@ -334,7 +334,7 @@ impl Plugin for LeSynth {
 }
 
 impl ClapPlugin for LeSynth {
-    const CLAP_ID: &'static str = "org.example.lesynth";
+    const CLAP_ID: &'static str = "com.hlavnicka.lesynth";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("A LeSynth plugin");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
@@ -342,7 +342,7 @@ impl ClapPlugin for LeSynth {
 }
 
 impl Vst3Plugin for LeSynth {
-    const VST3_CLASS_ID: [u8; 16] = *b"LeSynthPlug00001";
+    const VST3_CLASS_ID: [u8; 16] = *b"LeSynthFourier01";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
         Vst3SubCategory::Synth,
         Vst3SubCategory::Instrument,

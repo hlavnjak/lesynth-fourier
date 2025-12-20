@@ -4,7 +4,7 @@ set -euo pipefail
 PLUGIN_NAME="LeSynthFourier"
 # Rust cdylib on Linux usually produces "lib<crate>.so"
 SO_CANDIDATES=("liblesynth_fourier.so" "lesynth_fourier.so")
-VERSION="1.1.0"
+VERSION="1.2.0"
 TARGET="x86_64-unknown-linux-gnu"
 BUILD_DIR="target/${TARGET}/release"
 DIST_DIR="dist"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 PLUGIN_NAME="LeSynthFourier"
 DLL_NAME="lesynth_fourier.dll"
-VERSION="1.1.0"
+VERSION="1.2.0"
 TARGET="x86_64-pc-windows-gnu"
 BUILD_DIR="target/${TARGET}/release"
 DIST_DIR="dist"

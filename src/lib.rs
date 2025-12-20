@@ -67,3 +67,4 @@ pub fn init_logging() {
 }
 
 nih_plug::nih_export_vst3!(LeSynth);
+nih_plug::nih_export_clap!(LeSynth);

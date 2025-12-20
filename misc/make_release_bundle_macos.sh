@@ -4,7 +4,7 @@ set -euo pipefail
 # --- configurable bits ---
 PLUGIN_NAME="LeSynthFourier"             # bundle + executable name (no extension)
 CRATE_DYLIB_NAME="liblesynth_fourier.dylib"  # produced by cargo for macOS
-VERSION="1.1.0"
+VERSION="1.2.0"
 CARGO_TOOLCHAIN="+1.88.0"                # or "" to use default toolchain
 
 # Rust targets
