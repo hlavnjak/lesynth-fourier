@@ -31,7 +31,7 @@ pub fn draw_curve_controls(
     sine_amp_min: f64,
     sine_amp_max: f64,
 ) {
-    ui.columns(7, |cols| {
+    ui.columns(6, |cols| {
         let (offset, a, b, curve, granularity, wobble_amp, wobble_freq) = match chart_type {
             ChartType::Amp => (
                 &harmonic.curve_offset_amp,
@@ -142,42 +142,8 @@ pub fn draw_curve_controls(
             }
         }
 
-        // Column 3: Curve Type Combo
-        {
-            let combo_id = format!("{:?}_curve_type_combo_{}", chart_type, idx);
-            nih_plug_egui::egui::ComboBox::from_id_salt(combo_id)
-                .selected_text(format!("{:?}", curve.value()))
-                .show_ui(&mut cols[3], |ui| {
-                    for &variant in CurveType::VARIANTS.iter() {
-                        if ui
-                            .selectable_label(
-                                curve.value() == variant,
-                                format!("{:?}", variant),
-                            )
-                            .clicked()
-                        {
-                            setter.begin_set_parameter(curve);
-                            setter.set_parameter(curve, variant);
-                            setter.end_set_parameter(curve);
-                            match variant {
-                                CurveType::Sine => {
-                                    synth_compute_engine.fill_sin_curve(idx, chart_type.clone());
-                                }
-                                CurveType::Constant => {
-                                    let offset_value = match chart_type {
-                                        ChartType::Amp => offset.value(),
-                                        ChartType::Phase => offset.value(),
-                                    };
-                                    synth_compute_engine.fill_constant_curve(idx, offset_value, chart_type.clone());
-                                }
-                            }
-                            params_changed_action();
-                        }
-                    }
-                });
-        }
 
-        // Column 4: Wobble Amplitude
+        // Column 3: Wobble Amplitude
         {
             let param = wobble_amp;
             let engine = synth_compute_engine.clone();
@@ -197,7 +163,7 @@ pub fn draw_curve_controls(
             .suffix(" Wobble Amp.")
             .fixed_decimals(3);
             
-            let response = cols[4].add(slider);
+            let response = cols[3].add(slider);
             if response.drag_stopped() {
                 match curve.value() {
                     CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
@@ -213,7 +179,7 @@ pub fn draw_curve_controls(
             }
         }
 
-        // Column 5: Wobble Frequency
+        // Column 4: Wobble Frequency
         {
             let param = wobble_freq;
             let engine = synth_compute_engine.clone();
@@ -231,7 +197,7 @@ pub fn draw_curve_controls(
             .suffix(" Wobble Fq.")
             .fixed_decimals(1);
             
-            let response = cols[5].add(slider);
+            let response = cols[4].add(slider);
             if response.drag_stopped() {
                 match curve.value() {
                     CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
@@ -247,8 +213,8 @@ pub fn draw_curve_controls(
             }
         }
 
-        // Column 6: Enable Checkbox & Granularity
-        cols[6].vertical(|ui| {
+        // Column 5: Enable Checkbox, Granularity & Curve Type
+        cols[5].vertical(|ui| {
             // Enable Checkbox
             let new_enabled = {
                 let mut enabled = match chart_type {
@@ -308,6 +274,39 @@ pub fn draw_curve_controls(
                             setter.begin_set_parameter(granularity);
                             setter.set_parameter(granularity, variant);
                             setter.end_set_parameter(granularity);
+                            params_changed_action();
+                        }
+                    }
+                });
+
+            // Curve Type Combo
+            let combo_id = format!("{:?}_curve_type_combo_{}", chart_type, idx);
+            nih_plug_egui::egui::ComboBox::from_id_salt(combo_id)
+                .selected_text(format!("{:?}", curve.value()))
+                .show_ui(ui, |ui| {
+                    for &variant in CurveType::VARIANTS.iter() {
+                        if ui
+                            .selectable_label(
+                                curve.value() == variant,
+                                format!("{:?}", variant),
+                            )
+                            .clicked()
+                        {
+                            setter.begin_set_parameter(curve);
+                            setter.set_parameter(curve, variant);
+                            setter.end_set_parameter(curve);
+                            match variant {
+                                CurveType::Sine => {
+                                    synth_compute_engine.fill_sin_curve(idx, chart_type.clone());
+                                }
+                                CurveType::Constant => {
+                                    let offset_value = match chart_type {
+                                        ChartType::Amp => offset.value(),
+                                        ChartType::Phase => offset.value(),
+                                    };
+                                    synth_compute_engine.fill_constant_curve(idx, offset_value, chart_type.clone());
+                                }
+                            }
                             params_changed_action();
                         }
                     }
