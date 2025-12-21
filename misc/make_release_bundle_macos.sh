@@ -92,6 +92,25 @@ sed -i \
   -e "s#__VERSION__#${VERSION}#g" \
   "${CONTENTS_DIR}/Info.plist"
 
+# --- create CLAP plugin ---
+echo "==> Creating CLAP plugin"
+CLAP_NAME="${PLUGIN_NAME}.clap"
+cp "${UNIV_BIN}" "${DIST_DIR}/${CLAP_NAME}"
+
+# --- create archives ---
+echo "==> Creating release archives"
+(
+  cd "${DIST_DIR}"
+  # VST3 archive  
+  zip -r "lesynth_fourier-v${VERSION}-vst3-macos.zip" "${PLUGIN_NAME}.vst3"
+  
+  # CLAP archive
+  zip "lesynth_fourier-v${VERSION}-clap-macos.zip" "${CLAP_NAME}"
+)
+
+echo "macOS bundles created:"
+echo "  VST3: ${DIST_DIR}/lesynth_fourier-v${VERSION}-vst3-macos.zip"
+echo "  CLAP: ${DIST_DIR}/lesynth_fourier-v${VERSION}-clap-macos.zip"
 echo "  Bundle ready at: ${BUNDLE_ROOT}"
 echo "   Contents:"
 command -v tree >/dev/null 2>&1 && tree -a "${BUNDLE_ROOT}" || find "${BUNDLE_ROOT}" -print

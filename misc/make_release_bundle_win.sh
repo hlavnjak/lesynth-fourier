@@ -15,14 +15,24 @@ cargo +1.88.0 build --release --target "$TARGET"
 rm -rf "${DIST_DIR:?}/${PLUGIN_NAME}.vst3"
 mkdir -p "${DIST_DIR}/${PLUGIN_NAME}.vst3/Contents/x86_64-win"
 
-# Copy the DLL into bundle
+# Copy the DLL into bundle as VST3
 cp "${BUILD_DIR}/${DLL_NAME}" \
-   "${DIST_DIR}/${PLUGIN_NAME}.vst3/Contents/x86_64-win/"
+   "${DIST_DIR}/${PLUGIN_NAME}.vst3/Contents/x86_64-win/${PLUGIN_NAME}.vst3"
 
-# Package into zip with new name
+# Create CLAP plugin
+CLAP_NAME="${PLUGIN_NAME}.clap"
+cp "${BUILD_DIR}/${DLL_NAME}" "${DIST_DIR}/${CLAP_NAME}"
+
+# Package into separate archives
 (
   cd "$DIST_DIR"
-  zip -r "lesynth_fourier_win_${VERSION}.zip" "${PLUGIN_NAME}.vst3"
+  # VST3 archive
+  zip -r "lesynth_fourier-v${VERSION}-vst3-win.zip" "${PLUGIN_NAME}.vst3"
+  
+  # CLAP archive
+  zip "lesynth_fourier-v${VERSION}-clap-win.zip" "${CLAP_NAME}"
 )
 
-echo "Bundle created at ${DIST_DIR}/lesynth_fourier_win_${VERSION}.zip"
+echo "Windows bundles created:"
+echo "  VST3: ${DIST_DIR}/lesynth_fourier-v${VERSION}-vst3-win.zip"
+echo "  CLAP: ${DIST_DIR}/lesynth_fourier-v${VERSION}-clap-win.zip"

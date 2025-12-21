@@ -31,15 +31,28 @@ mkdir -p "${DIST_DIR}/${PLUGIN_NAME}.vst3/Contents/x86_64-linux"
 
 # 4) Copy the .so into the bundle
 cp "${BUILD_DIR}/${SO_NAME}" \
-   "${DIST_DIR}/${PLUGIN_NAME}.vst3/Contents/x86_64-linux/"
+   "${DIST_DIR}/${PLUGIN_NAME}.vst3/Contents/x86_64-linux/${PLUGIN_NAME}.so"
 
 # (Optional) Strip for smaller size — comment out if you prefer full symbols
-strip --strip-unneeded "${DIST_DIR}/${PLUGIN_NAME}.vst3/Contents/x86_64-linux/${SO_NAME}" || true
+strip --strip-unneeded "${DIST_DIR}/${PLUGIN_NAME}.vst3/Contents/x86_64-linux/${PLUGIN_NAME}.so" || true
 
-# 5) Zip it up
+# 5) Create CLAP plugin
+CLAP_NAME="${PLUGIN_NAME}.clap"
+cp "${BUILD_DIR}/${SO_NAME}" "${DIST_DIR}/${CLAP_NAME}"
+
+# Strip CLAP plugin too
+strip --strip-unneeded "${DIST_DIR}/${CLAP_NAME}" || true
+
+# 6) Create separate archives
 (
   cd "$DIST_DIR"
-  zip -r "lesynth_fourier_linux_${VERSION}.zip" "${PLUGIN_NAME}.vst3"
+  # VST3 archive
+  zip -r "lesynth_fourier-v${VERSION}-vst3-linux.zip" "${PLUGIN_NAME}.vst3"
+  
+  # CLAP archive
+  zip "lesynth_fourier-v${VERSION}-clap-linux.zip" "${CLAP_NAME}"
 )
 
-echo "Linux bundle created at ${DIST_DIR}/lesynth_fourier_linux_${VERSION}.zip"
+echo "Linux bundles created:"
+echo "  VST3: ${DIST_DIR}/lesynth_fourier-v${VERSION}-vst3-linux.zip"
+echo "  CLAP: ${DIST_DIR}/lesynth_fourier-v${VERSION}-clap-linux.zip"
