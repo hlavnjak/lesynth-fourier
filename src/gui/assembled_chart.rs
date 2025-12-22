@@ -16,14 +16,16 @@ use std::sync::Arc;
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
 use crate::engine::SynthComputeEngine;
 
-pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engine: &Arc<SynthComputeEngine>) {
+pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engine: &Arc<SynthComputeEngine>,
+window_width : f32)  {
     // Check if we should reset the view to default range (0-2000)
     let should_reset_view = synth_compute_engine
         .shared_params
         .should_reset_chart_view
         .load(std::sync::atomic::Ordering::Relaxed);
     // Use responsive dimensions based on available space
-    let chart_width = ui.available_width() - 10.0;
+    let chart_width = window_width - 10.0;
+    //TODO replace with coeficient*window_height
     let chart_height = ui.available_height() - 10.0;
 
     Plot::new("Assembled Sound Plot")

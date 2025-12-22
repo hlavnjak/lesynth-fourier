@@ -34,8 +34,8 @@ pub fn draw_harmonic_plot(
     };
 
     let mut plot = Plot::new(plot_id)
-        .height(chart_h.max(150.0))
-        .width(chart_w.max(300.0))
+        .height(chart_h)
+        .width(chart_w)
         .allow_zoom([false, false])
         .allow_scroll([false, false])
         .allow_drag([false, false])

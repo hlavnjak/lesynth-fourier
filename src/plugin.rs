@@ -208,8 +208,10 @@ impl Plugin for LeSynth {
                 let mut last_pressed_key_persist: Option<usize> = Some(15);
 
                 // The following params are changed when the window is resized
-                let (width, heigth) = synth_params.editor_state.size();
-                egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(width as f32, heigth as f32)));
+                let (window_width, window_heigth) = synth_params.editor_state.size();
+                let window_width = window_width as f32;
+                let window_heigth = window_heigth as f32;
+                egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(window_width, window_heigth)));
 
                 egui_ctx.memory_mut(|mem| {
                     last_pressed_key =
@@ -220,7 +222,7 @@ impl Plugin for LeSynth {
                 });
                 egui::CentralPanel::default().show(egui_ctx, |ui| {
                         // Draw metallic background
-                        draw_metallic_background(ui, ui.available_rect_before_wrap());
+                        //draw_metallic_background(ui, ui.available_rect_before_wrap());
                         
                         let params_changed_action = || {
                             synth_compute_engine.set_normalization_needed(true);
@@ -247,6 +249,7 @@ impl Plugin for LeSynth {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
                             .max_height((ui.available_height() * 0.35).max(300.0).min(400.0))
+                            .max_width(ui.available_width())
                             .show(ui, |ui| {
                                 for (idx, harmonic) in synth_params.harmonics.iter().enumerate() {
                                     ui.label(format!("Parameters for {}th harmonic:", idx + 1));
@@ -285,10 +288,13 @@ impl Plugin for LeSynth {
                                 }
                             });
 
+
                         ui.add_space(15.0);
                         ui.add_space(30.0);
 
                         let input = ui.input(|i| i.clone());
+                        egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(window_width, window_heigth)));
+
                         draw_piano_keyboard(
                             egui_ctx,
                             ui,
@@ -298,35 +304,62 @@ impl Plugin for LeSynth {
                             &synth_compute_engine,
                         );
 
+
                         ui.add_space(10.0);
 
-                        let available = ui.available_size();
                         let gutter = 10.0;
-                        let chart_w = (available.x - gutter) * 0.5;
-                        let chart_h = (available.y * 0.4).max(200.0);
+                        let chart_w = (window_width - gutter) * 0.5;
+                        let chart_h = (window_heigth * 0.2).max(200.0);
+                        let plot_start_point = egui::pos2(0.0, 0.4 * window_heigth);
 
-                        ui.columns(2, |columns| {
-                            draw_harmonic_plot(
-                                &mut columns[0],
-                                "Amplitude",
-                                ChartType::Amp,
-                                chart_w,
-                                chart_h,
-                                &synth_compute_engine,
-                            );
-                            draw_harmonic_plot(
-                                &mut columns[1],
-                                "Phase",
-                                ChartType::Phase,
-                                chart_w,
-                                chart_h,
-                                &synth_compute_engine,
-                            );
-                        });
+                        let left_rect = egui::Rect::from_min_size(
+                            plot_start_point,
+                            egui::vec2(chart_w, chart_h),
+                        );
+
+                        let right_rect = egui::Rect::from_min_size(
+                            plot_start_point + egui::vec2(chart_w + gutter, 0.0),
+                            egui::vec2(chart_w - gutter, chart_h),
+                        );
+
+                        ui.allocate_space(egui::vec2(window_width, chart_h));
+
+
+                        ui.allocate_new_ui(
+                            egui::UiBuilder::new()
+                                .max_rect(left_rect)
+                                .layout(*ui.layout()),
+                            |ui| {
+                                draw_harmonic_plot(
+                                    ui,
+                                    "Amplitude",
+                                    ChartType::Amp,
+                                    chart_w,
+                                    chart_h,
+                                    &synth_compute_engine,
+                                );
+                            },
+                        );
+
+                        ui.allocate_new_ui(
+                            egui::UiBuilder::new()
+                                .max_rect(right_rect)
+                                .layout(*ui.layout()),
+                            |ui| {
+                                draw_harmonic_plot(
+                                    ui,
+                                    "Phase",
+                                    ChartType::Phase,
+                                    chart_w,
+                                    chart_h,
+                                    &synth_compute_engine,
+                                );
+                            },
+                        );
 
                         ui.add_space(10.0);
 
-                        draw_assembled_chart(ui, &synth_compute_engine);
+                        draw_assembled_chart(ui, &synth_compute_engine, window_width);
                 });
             },
         )
