@@ -302,6 +302,7 @@ impl Plugin for LeSynth {
                             last_key_id,
                             last_key_id_persist,
                             &synth_compute_engine,
+                            window_width
                         );
 
 

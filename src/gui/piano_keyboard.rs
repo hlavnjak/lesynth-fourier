@@ -50,6 +50,7 @@ pub fn draw_piano_keyboard(
     last_key_id: nih_plug_egui::egui::Id,
     last_key_id_persist: nih_plug_egui::egui::Id,
     synth_compute_engine: &Arc<SynthComputeEngine>,
+    window_width: f32
 ) {
     let mut last_pressed_key = egui_ctx
         .memory(|mem| mem.data.get_temp::<Option<usize>>(last_key_id).unwrap_or(None));
@@ -57,18 +58,17 @@ pub fn draw_piano_keyboard(
     let mut last_pressed_key_persist = egui_ctx
         .memory(|mem| mem.data.get_temp::<Option<usize>>(last_key_id_persist).unwrap_or(Some(15)));
 
-    let available = ui.available_size();
     let keyboard_height = 80.0;
     let white_key_height = keyboard_height;
     let black_key_height = keyboard_height * 0.6;
     
     // Calculate number of white keys for proper spacing
     let actual_white_keys = (0..NUM_KEYS).filter(|&i| !is_black_key(i)).count();
-    let white_key_width = available.x / actual_white_keys as f32;
+    let white_key_width = window_width / actual_white_keys as f32;
     let black_key_width = white_key_width * 0.6;
 
     let (kb_rect, _kb_resp) = ui.allocate_exact_size(
-        Vec2::new(available.x, keyboard_height),
+        Vec2::new(window_width, keyboard_height),
         nih_plug_egui::egui::Sense::hover(),
     );
 
