@@ -50,7 +50,8 @@ pub fn draw_piano_keyboard(
     last_key_id: nih_plug_egui::egui::Id,
     last_key_id_persist: nih_plug_egui::egui::Id,
     synth_compute_engine: &Arc<SynthComputeEngine>,
-    window_width: f32
+    window_width: f32,
+    window_height: f32
 ) {
     let mut last_pressed_key = egui_ctx
         .memory(|mem| mem.data.get_temp::<Option<usize>>(last_key_id).unwrap_or(None));
@@ -58,7 +59,7 @@ pub fn draw_piano_keyboard(
     let mut last_pressed_key_persist = egui_ctx
         .memory(|mem| mem.data.get_temp::<Option<usize>>(last_key_id_persist).unwrap_or(Some(15)));
 
-    let keyboard_height = 80.0;
+    let keyboard_height = window_height * 0.055;
     let white_key_height = keyboard_height;
     let black_key_height = keyboard_height * 0.6;
     

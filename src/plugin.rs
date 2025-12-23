@@ -248,7 +248,7 @@ impl Plugin for LeSynth {
                         // Keep original structure but make it responsive
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
-                            .max_height((window_height * 0.35).max(300.0).min(400.0))
+                            .max_height(window_height * 0.25)
                             .max_width(window_width)
                             .show(ui, |ui| {
                                 for (idx, harmonic) in synth_params.harmonics.iter().enumerate() {
@@ -293,7 +293,6 @@ impl Plugin for LeSynth {
                             });
 
 
-                        ui.add_space(15.0);
                         ui.add_space(30.0);
 
                         let input = ui.input(|i| i.clone());
@@ -305,14 +304,13 @@ impl Plugin for LeSynth {
                             last_key_id,
                             last_key_id_persist,
                             &synth_compute_engine,
-                            window_width
+                            window_width,
+                            window_height
                         );
-
-                        ui.add_space(10.0);
 
                         let gutter = 10.0;
                         let chart_w = (window_width - gutter) * 0.5;
-                        let chart_h = (window_height * 0.2).max(200.0);
+                        let chart_h = (window_height * 0.3).max(200.0);
                         let plot_start_point = egui::pos2(0.0, 0.4 * window_height);
 
                         let left_rect = egui::Rect::from_min_size(
@@ -362,7 +360,7 @@ impl Plugin for LeSynth {
 
                         ui.add_space(10.0);
 
-                        draw_assembled_chart(ui, &synth_compute_engine, window_width);
+                        draw_assembled_chart(ui, &synth_compute_engine, window_width, window_height);
                 });
             },
         )
