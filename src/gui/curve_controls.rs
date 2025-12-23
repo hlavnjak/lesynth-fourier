@@ -30,287 +30,315 @@ pub fn draw_curve_controls(
     offset_max: f64,
     sine_amp_min: f64,
     sine_amp_max: f64,
+    window_width: f32,
+    window_heigth: f32,
 ) {
-    ui.columns(6, |cols| {
-        let (offset, a, b, curve, granularity, wobble_amp, wobble_freq) = match chart_type {
-            ChartType::Amp => (
-                &harmonic.curve_offset_amp,
-                &harmonic.sine_curve_amp_amp,
-                &harmonic.sine_curve_freq_amp,
-                &harmonic.curve_type_amp,
-                &harmonic.granularity_amp,
-                &harmonic.wobble_amp_amp,
-                &harmonic.wobble_freq_amp,
-            ),
-            ChartType::Phase => (
-                &harmonic.curve_offset_phase,
-                &harmonic.sine_curve_amp_phase,
-                &harmonic.sine_curve_freq_phase,
-                &harmonic.curve_type_phase,
-                &harmonic.granularity_phase,
-                &harmonic.wobble_amp_phase,
-                &harmonic.wobble_freq_phase,
-            ),
+    use nih_plug_egui::egui;
+
+    let (offset, a, b, curve, granularity, wobble_amp, wobble_freq) = match chart_type {
+        ChartType::Amp => (
+            &harmonic.curve_offset_amp,
+            &harmonic.sine_curve_amp_amp,
+            &harmonic.sine_curve_freq_amp,
+            &harmonic.curve_type_amp,
+            &harmonic.granularity_amp,
+            &harmonic.wobble_amp_amp,
+            &harmonic.wobble_freq_amp,
+        ),
+        ChartType::Phase => (
+            &harmonic.curve_offset_phase,
+            &harmonic.sine_curve_amp_phase,
+            &harmonic.sine_curve_freq_phase,
+            &harmonic.curve_type_phase,
+            &harmonic.granularity_phase,
+            &harmonic.wobble_amp_phase,
+            &harmonic.wobble_freq_phase,
+        ),
+    };
+
+    // one allocated row, split into 6 equal rects 
+    let col_w = (window_width / 6.0).max(1.0);
+
+    let line_h = ui.spacing().interact_size.y;
+    let vspace = ui.spacing().item_spacing.y;
+
+    let row_h = (line_h * 4.0 + vspace * 6.0)
+        .max((window_heigth * 0.10).max(90.0))
+        .min((window_heigth * 0.18).min(160.0));
+
+    let (_id, row_rect) = ui.allocate_space(egui::vec2(window_width, row_h));
+
+    let pad = egui::vec2(4.0, 2.0);
+
+    let col_rect = |i: usize| -> egui::Rect {
+        let min = row_rect.min + egui::vec2(i as f32 * col_w, 0.0) + pad;
+        let size = egui::vec2(col_w, row_h) - pad * 2.0;
+        egui::Rect::from_min_size(min, size)
+    };
+
+    let refill_after_drag = |engine: &SynthComputeEngine, chart_type: &ChartType| {
+        match curve.value() {
+            CurveType::Sine => engine.fill_sin_curve(idx, chart_type.clone()),
+            CurveType::Constant => engine.fill_constant_curve(idx, offset.value(), chart_type.clone()),
+        }
+    };
+
+    // Column 0: Offset
+    {
+        let rect = col_rect(0);
+        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
+            egui::Layout::top_down(egui::Align::Min),
+        ));
+
+        let param = offset;
+        let engine = synth_compute_engine.clone();
+        let chart_type_clone = chart_type.clone();
+
+        let granularity_max = granularity.value().as_f64();
+        let actual_max = match chart_type {
+            ChartType::Amp => granularity_max.min(offset_max),
+            ChartType::Phase => offset_max,
         };
 
-        // Column 0: Offset
-        {
-            let param = offset;
-            let engine = synth_compute_engine.clone();
-            let chart_type_clone = chart_type.clone();
-            let granularity_max = granularity.value().as_f64();
-            let actual_max = match chart_type {
-                ChartType::Amp => granularity_max.min(offset_max),
-                ChartType::Phase => offset_max, // Phase doesn't use granularity for range
-            };
-            let slider = nih_plug_egui::egui::Slider::from_get_set(offset_min..=actual_max, move |new_val| {
-                if let Some(v) = new_val {
-                    setter.begin_set_parameter(param);
-                    setter.set_parameter(param, v as f32);
-                    setter.end_set_parameter(param);
-                    v
-                } else {
-                    param.value() as f64
-                }
-            })
-            .suffix(" Offset");
-
-            let response = cols[0].add(slider);
-            if response.drag_stopped() {
-                match curve.value() {
-                    CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
-                    CurveType::Constant => engine.fill_constant_curve(idx, offset.value(), chart_type_clone.clone()),
-                }
-                params_changed_action();
+        let slider = egui::Slider::from_get_set(offset_min..=actual_max, move |new_val| {
+            if let Some(v) = new_val {
+                setter.begin_set_parameter(param);
+                setter.set_parameter(param, v as f32);
+                setter.end_set_parameter(param);
+                v
+            } else {
+                param.value() as f64
             }
+        })
+        .suffix(" Offset");
+
+        let response = col_ui.add(slider);
+        if response.drag_stopped() {
+            refill_after_drag(&engine, &chart_type_clone);
+            params_changed_action();
         }
+    }
 
-        // Column 1: Sine Amp
-        {
-            let param = a;
-            let engine = synth_compute_engine.clone();
-            let chart_type_clone = chart_type.clone();
-            let granularity_max = granularity.value().as_f64();
-            let actual_max = match chart_type {
-                ChartType::Amp => granularity_max.min(sine_amp_max),
-                ChartType::Phase => sine_amp_max, // Phase granularity doesn't affect sine amp for phase
-            };
-            let slider = nih_plug_egui::egui::Slider::from_get_set(sine_amp_min..=actual_max, move |new_val| {
-                if let Some(v) = new_val {
-                    setter.begin_set_parameter(param);
-                    setter.set_parameter(param, v as f32);
-                    setter.end_set_parameter(param);
-                    v
-                } else {
-                    param.value() as f64
-                }
-            })
-            .suffix(" Sine Amp.");
+    // Column 1: Sine Amp
+    {
+        let rect = col_rect(1);
+        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
+            egui::Layout::top_down(egui::Align::Min),
+        ));
 
-            let response = cols[1].add(slider);
-            if response.drag_stopped() {
-                if curve.value() == CurveType::Sine {
-                    engine.fill_sin_curve(idx, chart_type_clone.clone());
-                }
-                params_changed_action();
+        let param = a;
+        let engine = synth_compute_engine.clone();
+        let chart_type_clone = chart_type.clone();
+
+        let granularity_max = granularity.value().as_f64();
+        let actual_max = match chart_type {
+            ChartType::Amp => granularity_max.min(sine_amp_max),
+            ChartType::Phase => sine_amp_max,
+        };
+
+        let slider = egui::Slider::from_get_set(sine_amp_min..=actual_max, move |new_val| {
+            if let Some(v) = new_val {
+                setter.begin_set_parameter(param);
+                setter.set_parameter(param, v as f32);
+                setter.end_set_parameter(param);
+                v
+            } else {
+                param.value() as f64
             }
-        }
+        })
+        .suffix(" Sine Amp.");
 
-        // Column 2: Sine Freq
-        {
-            let param = b;
-            let engine = synth_compute_engine.clone();
-            let chart_type_clone = chart_type.clone();
-            let slider = nih_plug_egui::egui::Slider::from_get_set(MIN_SINE_FREQ..=MAX_SINE_FREQ, move |new_val| {
-                if let Some(vf) = new_val {
-                    setter.begin_set_parameter(param);
-                    setter.set_parameter(param, vf as f32);
-                    setter.end_set_parameter(param);
-                    vf as f64
-                } else {
-                    param.value() as f64
-                }
-            })
-            .suffix(" Sine Fq.");
-
-            let response = cols[2].add(slider);
-            if response.drag_stopped() {
-                if curve.value() == CurveType::Sine {
-                    engine.fill_sin_curve(idx, chart_type_clone.clone());
-                }
-                params_changed_action();
+        let response = col_ui.add(slider);
+        if response.drag_stopped() {
+            if curve.value() == CurveType::Sine {
+                engine.fill_sin_curve(idx, chart_type_clone.clone());
             }
+            params_changed_action();
         }
+    }
 
+    // Column 2: Sine Freq
+    {
+        let rect = col_rect(2);
+        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
+            egui::Layout::top_down(egui::Align::Min),
+        ));
 
-        // Column 3: Wobble Amplitude
-        {
-            let param = wobble_amp;
-            let engine = synth_compute_engine.clone();
-            let chart_type_clone = chart_type.clone();
-            let granularity_max = granularity.value().as_f64();
-            let wobble_max = granularity_max.min(0.2);
-            let slider = nih_plug_egui::egui::Slider::from_get_set(0.0..=wobble_max, move |new_val| {
-                if let Some(v) = new_val {
-                    setter.begin_set_parameter(param);
-                    setter.set_parameter(param, v as f32);
-                    setter.end_set_parameter(param);
-                    v as f64
-                } else {
-                    param.value() as f64
-                }
-            })
-            .suffix(" Wobble Amp.")
-            .fixed_decimals(3);
-            
-            let response = cols[3].add(slider);
-            if response.drag_stopped() {
-                match curve.value() {
-                    CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
-                    CurveType::Constant => {
-                        let offset_value = match chart_type {
-                            ChartType::Amp => offset.value(),
-                            ChartType::Phase => offset.value(),
-                        };
-                        engine.fill_constant_curve(idx, offset_value, chart_type_clone.clone());
-                    }
-                }
-                params_changed_action();
+        let param = b;
+        let engine = synth_compute_engine.clone();
+        let chart_type_clone = chart_type.clone();
+
+        let slider = egui::Slider::from_get_set(MIN_SINE_FREQ..=MAX_SINE_FREQ, move |new_val| {
+            if let Some(vf) = new_val {
+                setter.begin_set_parameter(param);
+                setter.set_parameter(param, vf as f32);
+                setter.end_set_parameter(param);
+                vf as f64
+            } else {
+                param.value() as f64
             }
-        }
+        })
+        .suffix(" Sine Fq.");
 
-        // Column 4: Wobble Frequency
-        {
-            let param = wobble_freq;
-            let engine = synth_compute_engine.clone();
-            let chart_type_clone = chart_type.clone();
-            let slider = nih_plug_egui::egui::Slider::from_get_set(10.0..=200.0, move |new_val| {
-                if let Some(vf) = new_val {
-                    setter.begin_set_parameter(param);
-                    setter.set_parameter(param, vf as f32);
-                    setter.end_set_parameter(param);
-                    vf as f64
-                } else {
-                    param.value() as f64
-                }
-            })
-            .suffix(" Wobble Fq.")
-            .fixed_decimals(1);
-            
-            let response = cols[4].add(slider);
-            if response.drag_stopped() {
-                match curve.value() {
-                    CurveType::Sine => engine.fill_sin_curve(idx, chart_type_clone.clone()),
-                    CurveType::Constant => {
-                        let offset_value = match chart_type {
-                            ChartType::Amp => offset.value(),
-                            ChartType::Phase => offset.value(),
-                        };
-                        engine.fill_constant_curve(idx, offset_value, chart_type_clone.clone());
-                    }
-                }
-                params_changed_action();
+        let response = col_ui.add(slider);
+        if response.drag_stopped() {
+            if curve.value() == CurveType::Sine {
+                engine.fill_sin_curve(idx, chart_type_clone.clone());
             }
+            params_changed_action();
         }
+    }
 
-        // Column 5: Enable Checkbox, Granularity & Curve Type
-        cols[5].vertical(|ui| {
-            // Enable Checkbox
-            let new_enabled = {
-                let mut enabled = match chart_type {
-                    ChartType::Amp => synth_compute_engine
-                        .shared_params
-                        .harmonic_ampl_enabled
-                        .lock()
-                        .unwrap(),
-                    ChartType::Phase => synth_compute_engine
-                        .shared_params
-                        .harmonic_phase_enabled
-                        .lock()
-                        .unwrap(),
-                };
-                let checkbox = ui.checkbox(&mut enabled[idx], "Enabled");
-                if checkbox.changed() {
-                    let new_val = enabled[idx];
-                    Some(new_val)
-                } else {
-                    None
-                }
+    // Column 3: Wobble Amp
+    {
+        let rect = col_rect(3);
+        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
+            egui::Layout::top_down(egui::Align::Min),
+        ));
+
+        let param = wobble_amp;
+        let engine = synth_compute_engine.clone();
+        let chart_type_clone = chart_type.clone();
+
+        let granularity_max = granularity.value().as_f64();
+        let wobble_max = granularity_max.min(0.2);
+
+        let slider = egui::Slider::from_get_set(0.0..=wobble_max, move |new_val| {
+            if let Some(v) = new_val {
+                setter.begin_set_parameter(param);
+                setter.set_parameter(param, v as f32);
+                setter.end_set_parameter(param);
+                v as f64
+            } else {
+                param.value() as f64
+            }
+        })
+        .suffix(" Wobble Amp.")
+        .fixed_decimals(3);
+
+        let response = col_ui.add(slider);
+        if response.drag_stopped() {
+            refill_after_drag(&engine, &chart_type_clone);
+            params_changed_action();
+        }
+    }
+
+    // Column 4: Wobble Freq
+    {
+        let rect = col_rect(4);
+        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
+            egui::Layout::top_down(egui::Align::Min),
+        ));
+
+        let param = wobble_freq;
+        let engine = synth_compute_engine.clone();
+        let chart_type_clone = chart_type.clone();
+
+        let slider = egui::Slider::from_get_set(10.0..=200.0, move |new_val| {
+            if let Some(vf) = new_val {
+                setter.begin_set_parameter(param);
+                setter.set_parameter(param, vf as f32);
+                setter.end_set_parameter(param);
+                vf as f64
+            } else {
+                param.value() as f64
+            }
+        })
+        .suffix(" Wobble Fq.")
+        .fixed_decimals(1);
+
+        let response = col_ui.add(slider);
+        if response.drag_stopped() {
+            refill_after_drag(&engine, &chart_type_clone);
+            params_changed_action();
+        }
+    }
+
+    // Column 5: Enabled + Granularity + CurveType
+    {
+        let rect = col_rect(5);
+        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
+            egui::Layout::top_down(egui::Align::Min),
+        ));
+
+        // Enabled checkbox
+        let changed = {
+            let mut enabled = match chart_type {
+                ChartType::Amp => synth_compute_engine
+                    .shared_params
+                    .harmonic_ampl_enabled
+                    .lock()
+                    .unwrap(),
+                ChartType::Phase => synth_compute_engine
+                    .shared_params
+                    .harmonic_phase_enabled
+                    .lock()
+                    .unwrap(),
             };
 
-            if let Some(_val) = new_enabled {
-                // Mark all buffers as dirty since enabled state affects audio generation
-                synth_compute_engine.shared_params.mark_all_buffers_dirty();
-                // Update assembled chart immediately to reflect the enable state change
-                synth_compute_engine.update_assembled_chart_with_key24();
-                params_changed_action();
-            }
+            col_ui.checkbox(&mut enabled[idx], "Enabled").changed()
+        };
 
-            // Granularity Select
-            let granularity_combo_id = format!("{:?}_granularity_combo_{}", chart_type, idx);
-            nih_plug_egui::egui::ComboBox::from_id_salt(granularity_combo_id)
-                .selected_text(match granularity.value() {
-                    GranularityLevel::UltraLow => "Max: 0.025",
-                    GranularityLevel::VeryLow => "Max: 0.05",
-                    GranularityLevel::Low => "Max: 0.1",
-                    GranularityLevel::Medium => "Max: 0.5", 
-                    GranularityLevel::High => "Max: 1.0",
-                })
-                .show_ui(ui, |ui| {
-                    for &variant in GranularityLevel::VARIANTS.iter() {
-                        if ui
-                            .selectable_label(
-                                granularity.value() == variant,
-                                match variant {
-                                    GranularityLevel::UltraLow => "Max: 0.025",
-                                    GranularityLevel::VeryLow => "Max: 0.05",
-                                    GranularityLevel::Low => "Max: 0.1",
-                                    GranularityLevel::Medium => "Max: 0.5", 
-                                    GranularityLevel::High => "Max: 1.0",
-                                },
-                            )
-                            .clicked()
-                        {
-                            setter.begin_set_parameter(granularity);
-                            setter.set_parameter(granularity, variant);
-                            setter.end_set_parameter(granularity);
-                            params_changed_action();
-                        }
+        if changed {
+            synth_compute_engine.shared_params.mark_all_buffers_dirty();
+            synth_compute_engine.update_assembled_chart_with_key24();
+            params_changed_action();
+        }
+
+        // Granularity combo
+        let granularity_combo_id = format!("{:?}_granularity_combo_{}", chart_type, idx);
+        egui::ComboBox::from_id_salt(granularity_combo_id)
+            .selected_text(match granularity.value() {
+                GranularityLevel::UltraLow => "Max: 0.025",
+                GranularityLevel::VeryLow => "Max: 0.05",
+                GranularityLevel::Low => "Max: 0.1",
+                GranularityLevel::Medium => "Max: 0.5",
+                GranularityLevel::High => "Max: 1.0",
+            })
+            .show_ui(&mut col_ui, |ui| {
+                for &variant in GranularityLevel::VARIANTS.iter() {
+                    let label = match variant {
+                        GranularityLevel::UltraLow => "Max: 0.025",
+                        GranularityLevel::VeryLow => "Max: 0.05",
+                        GranularityLevel::Low => "Max: 0.1",
+                        GranularityLevel::Medium => "Max: 0.5",
+                        GranularityLevel::High => "Max: 1.0",
+                    };
+
+                    if ui.selectable_label(granularity.value() == variant, label).clicked() {
+                        setter.begin_set_parameter(granularity);
+                        setter.set_parameter(granularity, variant);
+                        setter.end_set_parameter(granularity);
+                        params_changed_action();
                     }
-                });
+                }
+            });
 
-            // Curve Type Combo
-            let combo_id = format!("{:?}_curve_type_combo_{}", chart_type, idx);
-            nih_plug_egui::egui::ComboBox::from_id_salt(combo_id)
-                .selected_text(format!("{:?}", curve.value()))
-                .show_ui(ui, |ui| {
-                    for &variant in CurveType::VARIANTS.iter() {
-                        if ui
-                            .selectable_label(
-                                curve.value() == variant,
-                                format!("{:?}", variant),
-                            )
-                            .clicked()
-                        {
-                            setter.begin_set_parameter(curve);
-                            setter.set_parameter(curve, variant);
-                            setter.end_set_parameter(curve);
-                            match variant {
-                                CurveType::Sine => {
-                                    synth_compute_engine.fill_sin_curve(idx, chart_type.clone());
-                                }
-                                CurveType::Constant => {
-                                    let offset_value = match chart_type {
-                                        ChartType::Amp => offset.value(),
-                                        ChartType::Phase => offset.value(),
-                                    };
-                                    synth_compute_engine.fill_constant_curve(idx, offset_value, chart_type.clone());
-                                }
+        // Curve type combo
+        let combo_id = format!("{:?}_curve_type_combo_{}", chart_type, idx);
+        egui::ComboBox::from_id_salt(combo_id)
+            .selected_text(format!("{:?}", curve.value()))
+            .show_ui(&mut col_ui, |ui| {
+                for &variant in CurveType::VARIANTS.iter() {
+                    if ui
+                        .selectable_label(curve.value() == variant, format!("{:?}", variant))
+                        .clicked()
+                    {
+                        setter.begin_set_parameter(curve);
+                        setter.set_parameter(curve, variant);
+                        setter.end_set_parameter(curve);
+
+                        match variant {
+                            CurveType::Sine => synth_compute_engine.fill_sin_curve(idx, chart_type.clone()),
+                            CurveType::Constant => {
+                                synth_compute_engine
+                                    .fill_constant_curve(idx, offset.value(), chart_type.clone());
                             }
-                            params_changed_action();
                         }
+
+                        params_changed_action();
                     }
-                });
-        });
-    });
+                }
+            });
+    }
 }

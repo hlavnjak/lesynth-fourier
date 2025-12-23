@@ -248,8 +248,8 @@ impl Plugin for LeSynth {
                         // Keep original structure but make it responsive
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
-                            .max_height((ui.available_height() * 0.35).max(300.0).min(400.0))
-                            .max_width(ui.available_width())
+                            .max_height((window_heigth * 0.35).max(300.0).min(400.0))
+                            .max_width(window_width)
                             .show(ui, |ui| {
                                 for (idx, harmonic) in synth_params.harmonics.iter().enumerate() {
                                     ui.label(format!("Parameters for {}th harmonic:", idx + 1));
@@ -267,6 +267,8 @@ impl Plugin for LeSynth {
                                         MAX_OFFSET_AMP,
                                         MIN_AMP_SINE_AMP,
                                         MAX_AMP_SINE_AMP,
+                                        window_width,
+                                        window_heigth,
                                     );
 
                                     ui.label(format!("Phase Chart:"));
@@ -282,6 +284,8 @@ impl Plugin for LeSynth {
                                         MAX_OFFSET_PHASE,
                                         MIN_PHASE_SINE_AMP,
                                         MAX_PHASE_SINE_AMP,
+                                        window_width,
+                                        window_heigth,
                                     );
 
                                     ui.separator();
@@ -293,7 +297,6 @@ impl Plugin for LeSynth {
                         ui.add_space(30.0);
 
                         let input = ui.input(|i| i.clone());
-                        egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(window_width, window_heigth)));
 
                         draw_piano_keyboard(
                             egui_ctx,
@@ -304,7 +307,6 @@ impl Plugin for LeSynth {
                             &synth_compute_engine,
                             window_width
                         );
-
 
                         ui.add_space(10.0);
 
