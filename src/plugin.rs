@@ -261,6 +261,7 @@ impl Plugin for LeSynth {
                                     ui.label(
                                         egui::RichText::new("Amplitude Chart:")
                                             .strong()
+                                            .size(13.0)
                                     );
                                     draw_curve_controls(
                                         ui,
@@ -280,6 +281,7 @@ impl Plugin for LeSynth {
                                     ui.label(
                                         egui::RichText::new("Phase Chart:")
                                             .strong()
+                                            .size(13.0)
                                     );
                                     draw_curve_controls(
                                         ui,
