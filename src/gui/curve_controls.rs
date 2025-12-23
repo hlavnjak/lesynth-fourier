@@ -378,7 +378,10 @@ pub fn draw_curve_controls(
                     .unwrap(),
             };
 
-            col_ui.checkbox(&mut enabled[idx], "Enabled").changed()
+            col_ui.checkbox(&mut enabled[idx], 
+                nih_plug_egui::egui::RichText::new("Enabled")
+                    .color(nih_plug_egui::egui::Color32::WHITE)
+            ).changed()
         };
 
         if changed {
@@ -390,13 +393,16 @@ pub fn draw_curve_controls(
         // Granularity combo
         let granularity_combo_id = format!("{:?}_granularity_combo_{}", chart_type, idx);
         egui::ComboBox::from_id_salt(granularity_combo_id)
-            .selected_text(match granularity.value() {
-                GranularityLevel::UltraLow => "Max: 0.025",
-                GranularityLevel::VeryLow => "Max: 0.05",
-                GranularityLevel::Low => "Max: 0.1",
-                GranularityLevel::Medium => "Max: 0.5",
-                GranularityLevel::High => "Max: 1.0",
-            })
+            .selected_text(
+                nih_plug_egui::egui::RichText::new(match granularity.value() {
+                    GranularityLevel::UltraLow => "Max: 0.025",
+                    GranularityLevel::VeryLow => "Max: 0.05",
+                    GranularityLevel::Low => "Max: 0.1",
+                    GranularityLevel::Medium => "Max: 0.5",
+                    GranularityLevel::High => "Max: 1.0",
+                })
+                .color(nih_plug_egui::egui::Color32::WHITE)
+            )
             .show_ui(&mut col_ui, |ui| {
                 style_other_controls(ui);
                 for &variant in GranularityLevel::VARIANTS.iter() {
@@ -420,7 +426,10 @@ pub fn draw_curve_controls(
         // Curve type combo
         let combo_id = format!("{:?}_curve_type_combo_{}", chart_type, idx);
         egui::ComboBox::from_id_salt(combo_id)
-            .selected_text(format!("{:?}", curve.value()))
+            .selected_text(
+                nih_plug_egui::egui::RichText::new(format!("{:?}", curve.value()))
+                    .color(nih_plug_egui::egui::Color32::WHITE)
+            )
             .show_ui(&mut col_ui, |ui| {
                 style_other_controls(ui);
                 for &variant in CurveType::VARIANTS.iter() {
