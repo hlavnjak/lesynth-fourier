@@ -294,6 +294,7 @@ impl Plugin for LeSynth {
                         ui.add_space(30.0);
 
                         let input = ui.input(|i| i.clone());
+                        let gutter = 10.0;
 
                         draw_piano_keyboard(
                             egui_ctx,
@@ -302,14 +303,14 @@ impl Plugin for LeSynth {
                             last_key_id,
                             last_key_id_persist,
                             &synth_compute_engine,
-                            window_width,
+                            window_width - 1.5*gutter,
                             window_height
                         );
 
-                        let gutter = 10.0;
                         let chart_w = (window_width - gutter) * 0.5;
                         let chart_h = (window_height * 0.3).max(200.0);
                         let plot_start_point = egui::pos2(0.0, 0.4 * window_height);
+                        let right_w = chart_w - gutter;
 
                         let left_rect = egui::Rect::from_min_size(
                             plot_start_point,
@@ -318,7 +319,7 @@ impl Plugin for LeSynth {
 
                         let right_rect = egui::Rect::from_min_size(
                             plot_start_point + egui::vec2(chart_w + gutter, 0.0),
-                            egui::vec2(chart_w - gutter, chart_h),
+                            egui::vec2(right_w, chart_h),
                         );
 
                         ui.allocate_space(egui::vec2(window_width, chart_h));
@@ -349,7 +350,7 @@ impl Plugin for LeSynth {
                                     ui,
                                     "Phase",
                                     ChartType::Phase,
-                                    chart_w,
+                                    right_w,
                                     chart_h,
                                     &synth_compute_engine,
                                 );
