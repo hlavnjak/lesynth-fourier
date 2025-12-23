@@ -56,18 +56,16 @@ pub fn draw_curve_controls(
         ),
     };
 
-    // one allocated row, split into 6 equal rects 
+    // one allocated row, split into 6 equal rects
     let col_w = (window_width / 6.0).max(1.0);
 
     let line_h = ui.spacing().interact_size.y;
     let vspace = ui.spacing().item_spacing.y;
 
-    let row_h = (line_h * 4.0 + vspace * 6.0)
-        .max((window_heigth * 0.10).max(90.0))
-        .min((window_heigth * 0.18).min(160.0));
+    // +1 extra line for the value label under each slider
+    let row_h = line_h * 5.0 + vspace * 4.0;
 
     let (_id, row_rect) = ui.allocate_space(egui::vec2(window_width, row_h));
-
     let pad = egui::vec2(4.0, 2.0);
 
     let col_rect = |i: usize| -> egui::Rect {
@@ -86,9 +84,11 @@ pub fn draw_curve_controls(
     // Column 0: Offset
     {
         let rect = col_rect(0);
-        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
-            egui::Layout::top_down(egui::Align::Min),
-        ));
+        let mut col_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
 
         let param = offset;
         let engine = synth_compute_engine.clone();
@@ -110,9 +110,11 @@ pub fn draw_curve_controls(
                 param.value() as f64
             }
         })
-        .suffix(" Offset");
+        .show_value(false);
 
         let response = col_ui.add(slider);
+        col_ui.label(format!("{:.3} Offset", offset.value() as f64));
+
         if response.drag_stopped() {
             refill_after_drag(&engine, &chart_type_clone);
             params_changed_action();
@@ -122,9 +124,11 @@ pub fn draw_curve_controls(
     // Column 1: Sine Amp
     {
         let rect = col_rect(1);
-        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
-            egui::Layout::top_down(egui::Align::Min),
-        ));
+        let mut col_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
 
         let param = a;
         let engine = synth_compute_engine.clone();
@@ -146,9 +150,11 @@ pub fn draw_curve_controls(
                 param.value() as f64
             }
         })
-        .suffix(" Sine Amp.");
+        .show_value(false);
 
         let response = col_ui.add(slider);
+        col_ui.label(format!("{:.3} Sine Amp.", a.value() as f64));
+
         if response.drag_stopped() {
             if curve.value() == CurveType::Sine {
                 engine.fill_sin_curve(idx, chart_type_clone.clone());
@@ -160,9 +166,11 @@ pub fn draw_curve_controls(
     // Column 2: Sine Freq
     {
         let rect = col_rect(2);
-        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
-            egui::Layout::top_down(egui::Align::Min),
-        ));
+        let mut col_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
 
         let param = b;
         let engine = synth_compute_engine.clone();
@@ -178,9 +186,11 @@ pub fn draw_curve_controls(
                 param.value() as f64
             }
         })
-        .suffix(" Sine Fq.");
+        .show_value(false);
 
         let response = col_ui.add(slider);
+        col_ui.label(format!("{:.1} Sine Fq.", b.value() as f64));
+
         if response.drag_stopped() {
             if curve.value() == CurveType::Sine {
                 engine.fill_sin_curve(idx, chart_type_clone.clone());
@@ -192,9 +202,11 @@ pub fn draw_curve_controls(
     // Column 3: Wobble Amp
     {
         let rect = col_rect(3);
-        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
-            egui::Layout::top_down(egui::Align::Min),
-        ));
+        let mut col_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
 
         let param = wobble_amp;
         let engine = synth_compute_engine.clone();
@@ -213,10 +225,11 @@ pub fn draw_curve_controls(
                 param.value() as f64
             }
         })
-        .suffix(" Wobble Amp.")
-        .fixed_decimals(3);
+        .show_value(false);
 
         let response = col_ui.add(slider);
+        col_ui.label(format!("{:.3} Wobble Amp.", wobble_amp.value() as f64));
+
         if response.drag_stopped() {
             refill_after_drag(&engine, &chart_type_clone);
             params_changed_action();
@@ -226,9 +239,11 @@ pub fn draw_curve_controls(
     // Column 4: Wobble Freq
     {
         let rect = col_rect(4);
-        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
-            egui::Layout::top_down(egui::Align::Min),
-        ));
+        let mut col_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
 
         let param = wobble_freq;
         let engine = synth_compute_engine.clone();
@@ -244,10 +259,11 @@ pub fn draw_curve_controls(
                 param.value() as f64
             }
         })
-        .suffix(" Wobble Fq.")
-        .fixed_decimals(1);
+        .show_value(false);
 
         let response = col_ui.add(slider);
+        col_ui.label(format!("{:.1} Wobble Fq.", wobble_freq.value() as f64));
+
         if response.drag_stopped() {
             refill_after_drag(&engine, &chart_type_clone);
             params_changed_action();
@@ -257,9 +273,11 @@ pub fn draw_curve_controls(
     // Column 5: Enabled + Granularity + CurveType
     {
         let rect = col_rect(5);
-        let mut col_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
-            egui::Layout::top_down(egui::Align::Min),
-        ));
+        let mut col_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
 
         // Enabled checkbox
         let changed = {
