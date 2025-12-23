@@ -18,7 +18,7 @@ pub fn draw_metallic_background(ui: &mut egui::Ui, window_width: f32, window_hei
     let painter = ui.painter();
     
     // Calculate approximate heights for different UI sections
-    let controls_height = window_height  * 0.25 + 10.0;
+    let controls_height = window_height  * 0.3 + 10.0;
     let controls_rect = Rect::from_min_size(
         egui::pos2(0.0, 0.0),
         egui::Vec2::new(window_width, controls_height)
