@@ -14,18 +14,18 @@
 
 use nih_plug_egui::egui::{self, Color32, Rect};
 
-pub fn draw_metallic_background(ui: &mut egui::Ui, available_rect: Rect) {
+pub fn draw_metallic_background(ui: &mut egui::Ui, window_width: f32, window_height: f32) {
     let painter = ui.painter();
     
     // Calculate approximate heights for different UI sections
-    let controls_height = (available_rect.height() * 0.35).max(300.0).min(400.0);
+    let controls_height = window_height  * 0.25 + 10.0;
     let controls_rect = Rect::from_min_size(
-        available_rect.min,
-        egui::Vec2::new(available_rect.width(), controls_height)
+        egui::pos2(0.0, 0.0),
+        egui::Vec2::new(window_width, controls_height)
     );
     let rest_rect = Rect::from_min_size(
-        egui::Pos2::new(available_rect.min.x, available_rect.min.y + controls_height),
-        egui::Vec2::new(available_rect.width(), available_rect.height() - controls_height)
+        egui::pos2(0.0, controls_height),
+        egui::Vec2::new(window_width, window_height - controls_height)
     );
     
     // Controls area - darker uranium gray for focus

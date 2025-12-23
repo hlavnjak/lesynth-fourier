@@ -222,7 +222,7 @@ impl Plugin for LeSynth {
                 });
                 egui::CentralPanel::default().show(egui_ctx, |ui| {
                         // Draw metallic background
-                        //draw_metallic_background(ui, ui.available_rect_before_wrap());
+                        draw_metallic_background(ui, window_width, window_height);
                         
                         let params_changed_action = || {
                             synth_compute_engine.set_normalization_needed(true);
@@ -268,7 +268,6 @@ impl Plugin for LeSynth {
                                         MIN_AMP_SINE_AMP,
                                         MAX_AMP_SINE_AMP,
                                         window_width,
-                                        window_height,
                                     );
 
                                     ui.label(format!("Phase Chart:"));
@@ -285,7 +284,6 @@ impl Plugin for LeSynth {
                                         MIN_PHASE_SINE_AMP,
                                         MAX_PHASE_SINE_AMP,
                                         window_width,
-                                        window_height,
                                     );
 
                                     ui.separator();

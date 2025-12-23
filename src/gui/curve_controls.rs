@@ -31,7 +31,6 @@ pub fn draw_curve_controls(
     sine_amp_min: f64,
     sine_amp_max: f64,
     window_width: f32,
-    window_height: f32,
 ) {
     use nih_plug_egui::egui;
 
