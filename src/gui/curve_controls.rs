@@ -18,6 +18,30 @@ use crate::constants::*;
 use crate::engine::{ChartType, SynthComputeEngine};
 use crate::params::{CurveType, GranularityLevel, HarmonicParam};
 
+fn style_slider(ui: &mut nih_plug_egui::egui::Ui) {
+    use nih_plug_egui::egui::{Color32, Stroke};
+
+    let style = ui.style_mut();
+
+    // Dark professional styling
+    style.visuals.widgets.inactive.bg_fill = Color32::from_gray(45);
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_gray(25));
+    style.visuals.widgets.inactive.fg_stroke = Stroke::new(2.0, Color32::from_rgb(65, 115, 190));
+
+    style.visuals.widgets.hovered.bg_fill = Color32::from_gray(50);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_gray(30));
+    style.visuals.widgets.hovered.fg_stroke = Stroke::new(2.0, Color32::from_rgb(85, 140, 220));
+
+    style.visuals.widgets.active.bg_fill = Color32::from_gray(55);
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.5, Color32::from_gray(35));
+    style.visuals.widgets.active.fg_stroke = Stroke::new(2.5, Color32::from_rgb(100, 160, 240));
+
+    // Enhanced slider handle
+    style.visuals.widgets.inactive.expansion = 2.0;
+    style.visuals.widgets.hovered.expansion = 3.0;
+    style.visuals.widgets.active.expansion = 4.0;
+}
+
 pub fn draw_curve_controls(
     ui: &mut nih_plug_egui::egui::Ui,
     idx: usize,
@@ -99,6 +123,8 @@ pub fn draw_curve_controls(
             ChartType::Phase => offset_max,
         };
 
+        style_slider(&mut col_ui);
+
         let slider = egui::Slider::from_get_set(offset_min..=actual_max, move |new_val| {
             if let Some(v) = new_val {
                 setter.begin_set_parameter(param);
@@ -139,6 +165,8 @@ pub fn draw_curve_controls(
             ChartType::Phase => sine_amp_max,
         };
 
+        style_slider(&mut col_ui);
+
         let slider = egui::Slider::from_get_set(sine_amp_min..=actual_max, move |new_val| {
             if let Some(v) = new_val {
                 setter.begin_set_parameter(param);
@@ -174,6 +202,8 @@ pub fn draw_curve_controls(
         let param = b;
         let engine = synth_compute_engine.clone();
         let chart_type_clone = chart_type.clone();
+
+        style_slider(&mut col_ui);
 
         let slider = egui::Slider::from_get_set(MIN_SINE_FREQ..=MAX_SINE_FREQ, move |new_val| {
             if let Some(vf) = new_val {
@@ -214,6 +244,8 @@ pub fn draw_curve_controls(
         let granularity_max = granularity.value().as_f64();
         let wobble_max = granularity_max.min(0.2);
 
+        style_slider(&mut col_ui);
+
         let slider = egui::Slider::from_get_set(0.0..=wobble_max, move |new_val| {
             if let Some(v) = new_val {
                 setter.begin_set_parameter(param);
@@ -247,6 +279,8 @@ pub fn draw_curve_controls(
         let param = wobble_freq;
         let engine = synth_compute_engine.clone();
         let chart_type_clone = chart_type.clone();
+
+        style_slider(&mut col_ui);
 
         let slider = egui::Slider::from_get_set(10.0..=200.0, move |new_val| {
             if let Some(vf) = new_val {
