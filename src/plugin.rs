@@ -208,10 +208,10 @@ impl Plugin for LeSynth {
                 let mut last_pressed_key_persist: Option<usize> = Some(15);
 
                 // The following params are changed when the window is resized
-                let (window_width, window_heigth) = synth_params.editor_state.size();
+                let (window_width, window_height) = synth_params.editor_state.size();
                 let window_width = window_width as f32;
-                let window_heigth = window_heigth as f32;
-                egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(window_width, window_heigth)));
+                let window_height = window_height as f32;
+                egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(window_width, window_height)));
 
                 egui_ctx.memory_mut(|mem| {
                     last_pressed_key =
@@ -248,7 +248,7 @@ impl Plugin for LeSynth {
                         // Keep original structure but make it responsive
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
-                            .max_height((window_heigth * 0.35).max(300.0).min(400.0))
+                            .max_height((window_height * 0.35).max(300.0).min(400.0))
                             .max_width(window_width)
                             .show(ui, |ui| {
                                 for (idx, harmonic) in synth_params.harmonics.iter().enumerate() {
@@ -268,7 +268,7 @@ impl Plugin for LeSynth {
                                         MIN_AMP_SINE_AMP,
                                         MAX_AMP_SINE_AMP,
                                         window_width,
-                                        window_heigth,
+                                        window_height,
                                     );
 
                                     ui.label(format!("Phase Chart:"));
@@ -285,7 +285,7 @@ impl Plugin for LeSynth {
                                         MIN_PHASE_SINE_AMP,
                                         MAX_PHASE_SINE_AMP,
                                         window_width,
-                                        window_heigth,
+                                        window_height,
                                     );
 
                                     ui.separator();
@@ -312,8 +312,8 @@ impl Plugin for LeSynth {
 
                         let gutter = 10.0;
                         let chart_w = (window_width - gutter) * 0.5;
-                        let chart_h = (window_heigth * 0.2).max(200.0);
-                        let plot_start_point = egui::pos2(0.0, 0.4 * window_heigth);
+                        let chart_h = (window_height * 0.2).max(200.0);
+                        let plot_start_point = egui::pos2(0.0, 0.4 * window_height);
 
                         let left_rect = egui::Rect::from_min_size(
                             plot_start_point,
