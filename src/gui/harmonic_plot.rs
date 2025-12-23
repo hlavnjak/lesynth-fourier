@@ -26,7 +26,11 @@ pub fn draw_harmonic_plot(
     chart_h: f32,
     synth_compute_engine: &Arc<SynthComputeEngine>,
 ) {
-    ui.label(title);
+    ui.label(
+        RichText::new(title)
+        .strong()
+        .size(16.0)
+    );
 
     let plot_id = match chart_type {
         ChartType::Amp => "Amplitude Plot",

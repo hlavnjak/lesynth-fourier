@@ -209,7 +209,7 @@ pub fn draw_curve_controls(
         .show_value(false);
 
         let response = col_ui.add(slider);
-        col_ui.label(format!("{:.3} Sine Amp.", a.value() as f64));
+        col_ui.label(format!("{:.3} Sine Amplitude", a.value() as f64));
 
         if response.drag_stopped() {
             if curve.value() == CurveType::Sine {
@@ -247,7 +247,7 @@ pub fn draw_curve_controls(
         .show_value(false);
 
         let response = col_ui.add(slider);
-        col_ui.label(format!("{:.1} Sine Fq.", b.value() as f64));
+        col_ui.label(format!("{:.1} Sine Frequency", b.value() as f64));
 
         if response.drag_stopped() {
             if curve.value() == CurveType::Sine {
@@ -288,7 +288,7 @@ pub fn draw_curve_controls(
         .show_value(false);
 
         let response = col_ui.add(slider);
-        col_ui.label(format!("{:.3} Wobble Amp.", wobble_amp.value() as f64));
+        col_ui.label(format!("{:.3} Wobble Amplitude", wobble_amp.value() as f64));
 
         if response.drag_stopped() {
             refill_after_drag(&engine, &chart_type_clone);
@@ -324,7 +324,7 @@ pub fn draw_curve_controls(
         .show_value(false);
 
         let response = col_ui.add(slider);
-        col_ui.label(format!("{:.1} Wobble Fq.", wobble_freq.value() as f64));
+        col_ui.label(format!("{:.1} Wobble Frequency", wobble_freq.value() as f64));
 
         if response.drag_stopped() {
             refill_after_drag(&engine, &chart_type_clone);

@@ -252,9 +252,16 @@ impl Plugin for LeSynth {
                             .max_width(window_width)
                             .show(ui, |ui| {
                                 for (idx, harmonic) in synth_params.harmonics.iter().enumerate() {
-                                    ui.label(format!("Parameters for {}th harmonic:", idx + 1));
+                                    ui.label(
+                                        egui::RichText::new(format!("Parameters for {}th harmonic:", idx + 1))
+                                            .strong()
+                                            .size(16.0)
+                                    );
                                     ui.add_space(15.0);
-                                    ui.label(format!("Amplitude Chart:"));
+                                    ui.label(
+                                        egui::RichText::new("Amplitude Chart:")
+                                            .strong()
+                                    );
                                     draw_curve_controls(
                                         ui,
                                         idx,
@@ -270,7 +277,10 @@ impl Plugin for LeSynth {
                                         window_width,
                                     );
 
-                                    ui.label(format!("Phase Chart:"));
+                                    ui.label(
+                                        egui::RichText::new("Phase Chart:")
+                                            .strong()
+                                    );
                                     draw_curve_controls(
                                         ui,
                                         idx,
