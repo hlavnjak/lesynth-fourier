@@ -62,7 +62,7 @@ pub fn draw_curve_controls(
     let vspace = ui.spacing().item_spacing.y;
 
     // +1 extra line for the value label under each slider
-    let row_h = line_h * 5.0 + vspace * 4.0;
+    let row_h = line_h * 3.0 + vspace * 4.0;
 
     let (_id, row_rect) = ui.allocate_space(egui::vec2(window_width, row_h));
     let pad = egui::vec2(4.0, 2.0);
