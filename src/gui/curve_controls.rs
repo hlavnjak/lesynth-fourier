@@ -23,7 +23,7 @@ fn style_slider(ui: &mut nih_plug_egui::egui::Ui) {
 
     let style = ui.style_mut();
 
-    // Dark professional styling
+    // Dark styling with prominent blue borders for sliders
     style.visuals.widgets.inactive.bg_fill = Color32::from_gray(45);
     style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_gray(25));
     style.visuals.widgets.inactive.fg_stroke = Stroke::new(2.0, Color32::from_rgb(65, 115, 190));
@@ -40,6 +40,35 @@ fn style_slider(ui: &mut nih_plug_egui::egui::Ui) {
     style.visuals.widgets.inactive.expansion = 2.0;
     style.visuals.widgets.hovered.expansion = 3.0;
     style.visuals.widgets.active.expansion = 4.0;
+}
+
+fn style_other_controls(ui: &mut nih_plug_egui::egui::Ui) {
+    use nih_plug_egui::egui::{Color32, Stroke};
+
+    let style = ui.style_mut();
+
+    style.visuals.widgets.inactive.bg_fill = Color32::from_gray(45);
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(65, 115, 190));
+    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_gray(200));
+
+    style.visuals.widgets.hovered.bg_fill = Color32::from_gray(55);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.5, Color32::from_rgb(85, 140, 220));
+    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_gray(220));
+
+    style.visuals.widgets.active.bg_fill = Color32::from_gray(65);
+    style.visuals.widgets.active.bg_stroke = Stroke::new(2.0, Color32::from_rgb(100, 160, 240));
+    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::from_gray(240));
+
+    style.visuals.widgets.open.bg_fill = Color32::from_gray(60);
+    style.visuals.widgets.open.bg_stroke = Stroke::new(2.0, Color32::from_rgb(120, 180, 255));
+    style.visuals.widgets.open.fg_stroke = Stroke::new(1.0, Color32::from_gray(240));
+
+    // Selection styling (for combo box items)
+    style.visuals.selection.bg_fill = Color32::from_rgb(80, 130, 200);
+    style.visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(100, 160, 240));
+
+    // Button styling
+    style.visuals.button_frame = true;
 }
 
 pub fn draw_curve_controls(
@@ -313,6 +342,8 @@ pub fn draw_curve_controls(
         );
 
         // Enabled checkbox
+        style_other_controls(&mut col_ui);
+
         let changed = {
             let mut enabled = match chart_type {
                 ChartType::Amp => synth_compute_engine
@@ -347,6 +378,7 @@ pub fn draw_curve_controls(
                 GranularityLevel::High => "Max: 1.0",
             })
             .show_ui(&mut col_ui, |ui| {
+                style_other_controls(ui);
                 for &variant in GranularityLevel::VARIANTS.iter() {
                     let label = match variant {
                         GranularityLevel::UltraLow => "Max: 0.025",
@@ -370,6 +402,7 @@ pub fn draw_curve_controls(
         egui::ComboBox::from_id_salt(combo_id)
             .selected_text(format!("{:?}", curve.value()))
             .show_ui(&mut col_ui, |ui| {
+                style_other_controls(ui);
                 for &variant in CurveType::VARIANTS.iter() {
                     if ui
                         .selectable_label(curve.value() == variant, format!("{:?}", variant))
