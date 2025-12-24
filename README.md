@@ -4,7 +4,7 @@ A powerful Fourier synthesizer VST3 audio plugin built in Rust using the nih-plu
 
 ![LeSynth in Action](assets/rich_setup_1.2.0.png)
 
-Better quality demo MP4 file can be found in the [releases page](https://github.com/hlavnjak/lesynth-fourier/releases/)
+Demo MP4 video file can be found in the Assets section of [releases page](https://github.com/hlavnjak/lesynth-fourier/releases/)
 
 ## Features
 
