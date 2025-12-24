@@ -72,6 +72,20 @@ LeSynth features a modular architecture with clear separation of concerns:
 - **GUI System**: Interactive interface with real-time plotting of time-varying harmonic curves
 - **Voice Management**: Polyphonic voice allocation with fade in/out
 
+## Testing Matrix
+
+LeSynth - Fourier has been tested on the following platforms and DAWs:
+
+| Platform | DAW/Host |
+|----------|----------|
+| Windows  | Reaper 7.56 |
+| macOS    | Ableton Live 12 |
+| macOS    | Waveform Free 13 |
+| Linux    | Reaper 7.56 |
+| Linux    | Custom VST Host (dev) |
+
+**Note**: While the plugin should work with other VST3-compatible DAWs, the above combinations have been specifically tested and verified to work correctly.
+
 ## Development
 
 ### Prerequisites
