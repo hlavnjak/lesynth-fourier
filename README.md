@@ -8,11 +8,11 @@ Better quality demo MP4 file can be found in the [releases page](https://github.
 
 ## Features
 
-- **64 Harmonics**: Significant control over amplitude and phase for each harmonic - constant and sine curve type fully customizable by GUI elements
+- **64 Harmonics**: Complete control over amplitude and phase for each harmonic with customizable time-varying curves
+- **Advanced Curve System & Time-Domain Modulation**: Modify amplitude/time and phase/time curves for each harmonic across buckets/periods using constant and sine curve types, enhanced with Wobble sine component for complex modulation
 - **Real-time Visualization**: Interactive plots showing harmonic data and assembled waveforms
 - **Piano Keyboard Interface**: Click-to-play virtual piano keyboard
 - **Polyphonic Synthesis**: Multiple voice support with automatic gain scaling
-- **Customizable Curves**: Constant and sine curve types for each harmonic
 - **Cross-Platform**: Works on all platforms supported by nih-plug
 - **Real-time Performance**: Optimized audio processing with background computation
 
@@ -64,8 +64,12 @@ The debug build includes comprehensive logging to both stdout and a log file (`l
 LeSynth features a modular architecture with clear separation of concerns:
 
 - **Audio Engine**: Real-time synthesis with background buffer computation
-- **Parameter System**: Thread-safe parameter management with 32 harmonics
-- **GUI System**: Interactive interface with real-time plotting
+- **Parameter System**: Thread-safe parameter management with 64 harmonics, each supporting independent amplitude and phase curve modulation over time
+- **Curve Modulation**: Each harmonic's amplitude and phase can be modified across time buckets/periods using:
+  - **Constant curves**: Static values with optional Wobble sine modulation
+  - **Sine curves**: Sinusoidal modulation with customizable amplitude and frequency, plus Wobble enhancement
+  - **Wobble component**: Additional sine-based modulation that can be applied to both curve types for complex harmonic evolution
+- **GUI System**: Interactive interface with real-time plotting of time-varying harmonic curves
 - **Voice Management**: Polyphonic voice allocation with fade in/out
 
 ## Development
