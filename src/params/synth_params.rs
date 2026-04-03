@@ -50,7 +50,7 @@ impl Default for LeSynthParams {
             max: MAX_OFFSET_PHASE as f32,
         };
 
-        let default_curve = CurveType::Constant;
+        let default_curve = CurveType::Sine;
 
         let default_a = 0.0;
         let default_b = 0.1;

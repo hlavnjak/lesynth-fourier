@@ -68,7 +68,7 @@ impl GranularityLevel {
 
 impl Default for GranularityLevel {
     fn default() -> Self {
-        GranularityLevel::High
+        GranularityLevel::Low
     }
 }
 
