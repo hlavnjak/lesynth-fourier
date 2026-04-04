@@ -20,27 +20,33 @@ use crate::engine::shared_params::BufferState;
 use crate::voice::Voice;
 
 fn is_black_key(key_index: usize) -> bool {
-    let octave_pos = key_index % 12;
+    // Piano starts at A0. Offset by 9 to align with C-based chromatic scale
+    // where black keys are C#(1), D#(3), F#(6), G#(8), A#(10)
+    let octave_pos = (key_index + 9) % 12;
     matches!(octave_pos, 1 | 3 | 6 | 8 | 10)
 }
 
 fn get_white_key_index(key_index: usize) -> usize {
-    let octave = key_index / 12;
-    let octave_pos = key_index % 12;
-    let white_keys_in_octave = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6];
-    octave * 7 + white_keys_in_octave[octave_pos]
+    // Count white keys from A0 up to (but not including) key_index
+    (0..key_index).filter(|&i| !is_black_key(i)).count()
 }
 
-fn get_black_key_offset(key_index: usize) -> f32 {
-    let octave_pos = key_index % 12;
-    match octave_pos {
+fn get_black_key_x_pos(key_index: usize) -> f32 {
+    // Returns absolute position in white-key-width units from the left edge.
+    // Use the C-based adjusted octave so the standard offsets apply.
+    let adjusted = key_index + 9;
+    let c_octave = adjusted / 12;
+    let c_octave_pos = adjusted % 12;
+    let within_octave = match c_octave_pos {
         1 => 0.7,   // C#
         3 => 1.7,   // D#
         6 => 3.3,   // F#
         8 => 4.3,   // G#
         10 => 5.3,  // A#
         _ => 0.0,
-    }
+    };
+    // Subtract 5.0 because A0 is the 6th white key (index 5) in the C0-relative system
+    c_octave as f32 * 7.0 + within_octave - 5.0
 }
 
 pub fn draw_piano_keyboard(
@@ -177,9 +183,7 @@ pub fn draw_piano_keyboard(
             continue;
         }
 
-        let octave = key_idx / 12;
-        let black_key_offset = get_black_key_offset(key_idx);
-        let x = kb_rect.left() + (octave as f32 * 7.0 + black_key_offset) * white_key_width - black_key_width / 2.0;
+        let x = kb_rect.left() + get_black_key_x_pos(key_idx) * white_key_width - black_key_width / 2.0;
         let key_rect = Rect::from_min_size(
             pos2(x, kb_rect.top()),
             Vec2::new(black_key_width, black_key_height),
@@ -233,8 +237,9 @@ pub fn draw_piano_keyboard(
     let mut keyboard_pressed_key: Option<usize> = None;
     let mut keyboard_released_key: Option<usize> = None;
     
-    // Map computer keyboard keys to piano keys (starting from C4 = key 48)
-    let base_key = 48; // C4
+    // Map computer keyboard keys to piano keys (starting from C4 = key 39)
+    // key 0 = A0 (27.5 Hz), so C4 = A0 + 39 semitones = key 39
+    let base_key = 39; // C4
     for event in &input.events {
         if let nih_plug_egui::egui::Event::Key { key, pressed, .. } = event {
             let piano_key = match key {

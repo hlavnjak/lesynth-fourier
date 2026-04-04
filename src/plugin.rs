@@ -66,6 +66,21 @@ impl Plugin for LeSynth {
         self.synth_params.clone()
     }
 
+    fn initialize(
+        &mut self,
+        _audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
+        _context: &mut impl InitContext<Self>,
+    ) -> bool {
+        self.synth_compute_engine
+            .shared_params
+            .update_sample_rate(buffer_config.sample_rate);
+        self.synth_compute_engine
+            .shared_params
+            .mark_all_buffers_dirty();
+        true
+    }
+
     fn process(
         &mut self,
         buffer: &mut Buffer,
@@ -79,7 +94,8 @@ impl Plugin for LeSynth {
         while let Some(event) = context.next_event() {
             match event {
                 NoteEvent::NoteOn { note, .. } => {
-                    let key_idx = note as usize;
+                    // MIDI A0 = note 21, our key 0 = A0, so subtract 21
+                    let key_idx = (note as usize).saturating_sub(21);
                     if key_idx < NUM_KEYS {
                         // Get pre-computed buffer or compute synchronously as fallback
                         let buf = self.synth_compute_engine.get_buffer_for_key(key_idx);
@@ -95,7 +111,7 @@ impl Plugin for LeSynth {
                     }
                 }
                 NoteEvent::NoteOff { note, .. } => {
-                    let key_idx = note as usize;
+                    let key_idx = (note as usize).saturating_sub(21);
                     if key_idx < NUM_KEYS {
                         let mut voices = shared.voices.lock().unwrap();
                         if let Some(v) = voices[key_idx].as_mut() {

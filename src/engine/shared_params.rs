@@ -73,14 +73,22 @@ impl SharedParams {
     }
 
     fn populate_piano_periods() -> Vec<u32> {
-        let sample_rate: f64 = 44100.0;
+        Self::compute_piano_periods(44100.0)
+    }
+
+    pub fn update_sample_rate(&self, sample_rate: f32) {
+        let new_periods = Self::compute_piano_periods(sample_rate as f64);
+        let mut piano_periods = self.piano_periods.lock().unwrap();
+        *piano_periods = new_periods;
+    }
+
+    fn compute_piano_periods(sample_rate: f64) -> Vec<u32> {
         let mut piano_periods = Vec::with_capacity(NUM_KEYS);
         for key in 0..NUM_KEYS {
             // Calculate the frequency for the given key.
-            // A0 (the 1st key) is 27.5 Hz and each key increases by the factor 2^(1/12).
+            // A0 (key 0) is 27.5 Hz and each key increases by the factor 2^(1/12).
             let frequency = 27.5 * 2f64.powf(key as f64 / 12.0);
             let period = (sample_rate / frequency).round() as u32;
-
             piano_periods.push(period);
         }
         piano_periods
