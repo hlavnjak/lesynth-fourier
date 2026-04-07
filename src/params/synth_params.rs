@@ -17,7 +17,7 @@ use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
 
 use crate::constants::*;
-use super::{CurveType, GranularityLevel, HarmonicParam};
+use super::{CurveType, GranularityLevel, HarmonicParam, NestedFourierAmps};
 
 #[derive(Params)]
 pub struct LeSynthParams {
@@ -64,10 +64,11 @@ impl Default for LeSynthParams {
 
         let harmonics = std::array::from_fn(|i| {
             let idx = i + 1;
+            let amp = if idx > 10 { 0.05 } else { default_amp };
             HarmonicParam {
                 curve_offset_amp: FloatParam::new(
                     &format!("Harmonic {} Curve Offset For Amplitude", idx),
-                    default_amp,
+                    amp,
                     amp_range,
                 ),
                 curve_offset_phase: FloatParam::new(
@@ -131,6 +132,7 @@ impl Default for LeSynthParams {
                     default_wobble_freq,
                     wobble_freq_range,
                 ),
+                nested_fourier_amps: Arc::new(NestedFourierAmps::new(i)),
             }
         });
 

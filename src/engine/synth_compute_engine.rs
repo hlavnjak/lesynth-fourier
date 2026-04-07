@@ -126,6 +126,29 @@ impl SynthComputeEngine {
         self.update_assembled_chart_with_key24();
     }
 
+    /// Fill harmonic n's amplitude data using a Fourier series of 16 sub-harmonics.
+    /// A(bucket) = clamp( Σ_{k=1}^{16} sub_k * sin(2π * k * bucket / num_buckets), 0, 1 )
+    pub fn fill_nested_fourier_curve(&self, n: usize) {
+        let sub_amps = self.synth_params.harmonics[n].nested_fourier_amps.values();
+
+        let mut data = self.shared_params.amplitude_data.lock().unwrap();
+        let num_buckets = data[n].len();
+
+        for bucket in 0..num_buckets {
+            let t = bucket as f64 / num_buckets as f64;
+            let mut value = 0.0f64;
+            for (k, &amp) in sub_amps.iter().enumerate() {
+                value += amp as f64 * (2.0 * std::f64::consts::PI * (k + 1) as f64 * t).sin();
+            }
+            data[n][bucket] = value.clamp(0.0, 1.0) as f32;
+        }
+
+        self.set_normalization_needed(true);
+        drop(data);
+        self.shared_params.mark_all_buffers_dirty();
+        self.update_assembled_chart_with_key24();
+    }
+
     pub fn normalize_amplitude_data(&self) {
         let ampl_data = self.shared_params.amplitude_data.lock().unwrap();
         let mut ampl_data_normalized = self.shared_params.amplitude_data_normalized.lock().unwrap();

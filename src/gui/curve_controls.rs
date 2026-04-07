@@ -130,6 +130,11 @@ pub fn draw_curve_controls(
         match curve.value() {
             CurveType::Sine => engine.fill_sin_curve(idx, chart_type.clone()),
             CurveType::Constant => engine.fill_constant_curve(idx, offset.value(), chart_type.clone()),
+            CurveType::NestedFourier => {
+                if matches!(chart_type, ChartType::Amp) {
+                    engine.fill_nested_fourier_curve(idx);
+                }
+            }
         }
     };
 
@@ -446,6 +451,11 @@ pub fn draw_curve_controls(
                             CurveType::Constant => {
                                 synth_compute_engine
                                     .fill_constant_curve(idx, offset.value(), chart_type.clone());
+                            }
+                            CurveType::NestedFourier => {
+                                if matches!(chart_type, ChartType::Amp) {
+                                    synth_compute_engine.fill_nested_fourier_curve(idx);
+                                }
                             }
                         }
 

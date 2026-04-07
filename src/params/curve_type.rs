@@ -18,13 +18,16 @@ use nih_plug::prelude::*;
 pub enum CurveType {
     Constant,
     Sine,
+    #[name = "Nested Fourier"]
+    NestedFourier,
 }
 
 impl CurveType {
     // so we can write `for variant in CurveType::VARIANTS`
-    pub const VARIANTS: [CurveType; 2] = [
+    pub const VARIANTS: [CurveType; 3] = [
         CurveType::Constant,
         CurveType::Sine,
+        CurveType::NestedFourier,
     ];
 }
 
@@ -78,9 +81,10 @@ mod tests {
 
     #[test]
     fn test_curve_type_variants() {
-        assert_eq!(CurveType::VARIANTS.len(), 2);
+        assert_eq!(CurveType::VARIANTS.len(), 3);
         assert_eq!(CurveType::VARIANTS[0], CurveType::Constant);
         assert_eq!(CurveType::VARIANTS[1], CurveType::Sine);
+        assert_eq!(CurveType::VARIANTS[2], CurveType::NestedFourier);
     }
 
     #[test]

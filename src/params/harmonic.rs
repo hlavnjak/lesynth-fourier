@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use nih_plug::prelude::*;
-use super::{CurveType, GranularityLevel};
+use super::{CurveType, GranularityLevel, NestedFourierAmps};
 
 /// A single harmonic's complete parameter set.
 /// - amp:     amplitude multiplier
@@ -50,4 +51,6 @@ pub struct HarmonicParam {
     pub wobble_amp_phase: FloatParam,
     #[id = "wobble_freq_phase"]
     pub wobble_freq_phase: FloatParam,
+    #[nested(group = "nested_fourier")]
+    pub nested_fourier_amps: Arc<NestedFourierAmps>,
 }

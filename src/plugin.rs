@@ -22,7 +22,7 @@ use nih_plug_egui::{
 
 use crate::constants::*;
 use crate::engine::{ChartType, SynthComputeEngine};
-use crate::gui::{draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_piano_keyboard, draw_metallic_background};
+use crate::gui::{draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_nested_fourier_controls, draw_piano_keyboard, draw_metallic_background};
 use crate::params::LeSynthParams;
 use crate::voice::Voice;
 
@@ -319,7 +319,24 @@ impl Plugin for LeSynth {
                             });
 
 
-                        ui.add_space(40.0);
+                        ui.add_space(8.0);
+
+                        // ── Nested Fourier sub-harmonic control panel ──────────────────
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_gray(30))
+                            .inner_margin(egui::Margin::same(6i8))
+                            .show(ui, |ui| {
+                                draw_nested_fourier_controls(
+                                    ui,
+                                    &synth_params,
+                                    synth_compute_engine.clone(),
+                                    setter,
+                                    &params_changed_action,
+                                    window_width - 12.0,
+                                );
+                            });
+
+                        ui.add_space(8.0);
 
                         let input = ui.input(|i| i.clone());
                         let gutter = 10.0;
