@@ -323,9 +323,11 @@ impl Plugin for LeSynth {
 
                         // ── Nested Fourier sub-harmonic control panel ──────────────────
                         egui::Frame::new()
-                            .fill(egui::Color32::from_gray(30))
+                            .fill(egui::Color32::from_gray(60))
                             .inner_margin(egui::Margin::same(6i8))
                             .show(ui, |ui| {
+                                ui.set_max_height(window_height * 0.1);
+                                ui.set_max_width(window_width);
                                 draw_nested_fourier_controls(
                                     ui,
                                     &synth_params,
@@ -354,8 +356,8 @@ impl Plugin for LeSynth {
 
 
                         let chart_w = (window_width - gutter) * 0.5;
-                        let chart_h = (window_height * 0.3).max(200.0);
-                        let plot_start_point = egui::pos2(0.0, 0.43 * window_height);
+                        let chart_h = (window_height * 0.20).max(200.0);
+                        let plot_start_point = egui::pos2(0.0, 0.53 * window_height);
                         let right_w = chart_w - gutter;
 
                         let left_rect = egui::Rect::from_min_size(
