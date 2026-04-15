@@ -106,8 +106,9 @@ pub fn draw_nested_fourier_controls(
                     style.visuals.widgets.active.expansion = 4.0;
                 }
 
+                let gran_max = synth_params.harmonics[harmonic_idx].granularity_amp.value().as_f64();
                 let slider =
-                    egui::Slider::from_get_set(-1.0..=1.0, move |new_val| {
+                    egui::Slider::from_get_set(-gran_max..=gran_max, move |new_val| {
                         if let Some(v) = new_val {
                             setter.begin_set_parameter(param);
                             setter.set_parameter(param, v as f32);
