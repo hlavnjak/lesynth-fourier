@@ -57,7 +57,8 @@ pub fn draw_piano_keyboard(
     last_key_id_persist: nih_plug_egui::egui::Id,
     synth_compute_engine: &Arc<SynthComputeEngine>,
     window_width: f32,
-    window_height: f32
+    window_height: f32,
+    y_offset: f32,
 ) {
     let mut last_pressed_key = egui_ctx
         .memory(|mem| mem.data.get_temp::<Option<usize>>(last_key_id).unwrap_or(None));
@@ -68,16 +69,11 @@ pub fn draw_piano_keyboard(
     let keyboard_height = window_height * 0.055;
     let white_key_height = keyboard_height;
     let black_key_height = keyboard_height * 0.6;
-    
+
     // Calculate number of white keys for proper spacing
     let actual_white_keys = (0..NUM_KEYS).filter(|&i| !is_black_key(i)).count();
     let white_key_width = window_width / actual_white_keys as f32;
     let black_key_width = white_key_width * 0.6;
-
-    let (kb_rect, _kb_resp) = ui.allocate_exact_size(
-        Vec2::new(window_width, keyboard_height),
-        nih_plug_egui::egui::Sense::hover(),
-    );
 
     let mut pressed_this_frame: Option<usize> = None;
 
@@ -118,12 +114,18 @@ pub fn draw_piano_keyboard(
         Color32::from_rgb(50, 150, 50) // Green for finished
     };
 
-    // Draw status label above keyboard
+    // Draw status label above keyboard, shifted down by y_offset
+    ui.add_space(y_offset);
     ui.horizontal(|ui| {
         ui.add_space(10.0);
         ui.colored_label(status_color, &status_text);
     });
     ui.add_space(5.0);
+
+    let (kb_rect, _kb_resp) = ui.allocate_exact_size(
+        Vec2::new(window_width, keyboard_height),
+        nih_plug_egui::egui::Sense::hover(),
+    );
 
     // Draw white keys first
     for key_idx in 0..NUM_KEYS {

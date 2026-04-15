@@ -351,7 +351,8 @@ impl Plugin for LeSynth {
                             last_key_id_persist,
                             &synth_compute_engine,
                             window_width - 1.5*gutter,
-                            window_height
+                            window_height,
+                            8.0,
                         );
 
 
