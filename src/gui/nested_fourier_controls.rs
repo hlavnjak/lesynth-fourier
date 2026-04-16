@@ -42,7 +42,6 @@ pub fn draw_nested_fourier_controls(
                 .color(Color32::WHITE),
         );
 
-        // Style the combo box
         {
             let style = ui.style_mut();
             style.visuals.widgets.inactive.bg_fill = Color32::from_gray(45);
@@ -76,20 +75,23 @@ pub fn draw_nested_fourier_controls(
         mem.data.insert_temp(selected_id, selected);
     });
 
-    // ── 16 vertical sliders ────────────────────────────────────────────────
-    let slider_h = 90.0;
+    // ── 16 columns: each column has a vertical amp slider + horizontal phase slider ──
+    let amp_slider_h = 80.0;
+    let phase_slider_h = 16.0;
     let col_w = (window_width / NUM_NESTED_FOURIER_HARMONICS as f32).max(28.0);
+    let gran_max = synth_params.harmonics[selected].granularity_amp.value().as_f64();
 
     ui.horizontal(|ui| {
         for sub_idx in 0..NUM_NESTED_FOURIER_HARMONICS {
-            let param = synth_params.harmonics[selected].nested_fourier_amps.get(sub_idx);
+            let amp_param   = synth_params.harmonics[selected].nested_fourier_amps.get(sub_idx);
+            let phase_param = synth_params.harmonics[selected].nested_fourier_phases.get(sub_idx);
             let engine = synth_compute_engine.clone();
             let harmonic_idx = selected;
 
             ui.vertical(|ui| {
                 ui.set_width(col_w);
 
-                // Style sliders dark/blue
+                // ── Amp slider (vertical, 0..=gran_max) ──
                 {
                     let style = ui.style_mut();
                     style.visuals.widgets.inactive.bg_fill = Color32::from_gray(45);
@@ -106,31 +108,72 @@ pub fn draw_nested_fourier_controls(
                     style.visuals.widgets.active.expansion = 4.0;
                 }
 
-                let gran_max = synth_params.harmonics[harmonic_idx].granularity_amp.value().as_f64();
-                let slider =
-                    egui::Slider::from_get_set(-gran_max..=gran_max, move |new_val| {
-                        if let Some(v) = new_val {
-                            setter.begin_set_parameter(param);
-                            setter.set_parameter(param, v as f32);
-                            setter.end_set_parameter(param);
-                            v
-                        } else {
-                            param.value() as f64
-                        }
-                    })
-                    .vertical()
-                    .show_value(false);
+                let amp_slider = egui::Slider::from_get_set(0.0..=gran_max, move |new_val| {
+                    if let Some(v) = new_val {
+                        setter.begin_set_parameter(amp_param);
+                        setter.set_parameter(amp_param, v as f32);
+                        setter.end_set_parameter(amp_param);
+                        v
+                    } else {
+                        amp_param.value() as f64
+                    }
+                })
+                .vertical()
+                .show_value(false);
 
-                let response = ui.add_sized([col_w - 4.0, slider_h], slider);
+                let amp_resp = ui.add_sized([col_w - 4.0, amp_slider_h], amp_slider);
 
+                // ── Phase slider (horizontal, -π..=π) ──
+                {
+                    let style = ui.style_mut();
+                    style.visuals.widgets.inactive.bg_fill = Color32::from_gray(40);
+                    style.visuals.widgets.inactive.fg_stroke =
+                        Stroke::new(2.0, Color32::from_rgb(180, 100, 60));
+                    style.visuals.widgets.hovered.bg_fill = Color32::from_gray(48);
+                    style.visuals.widgets.hovered.fg_stroke =
+                        Stroke::new(2.0, Color32::from_rgb(210, 130, 80));
+                    style.visuals.widgets.active.bg_fill = Color32::from_gray(55);
+                    style.visuals.widgets.active.fg_stroke =
+                        Stroke::new(2.5, Color32::from_rgb(240, 160, 100));
+                    style.visuals.widgets.inactive.expansion = 1.0;
+                    style.visuals.widgets.hovered.expansion = 2.0;
+                    style.visuals.widgets.active.expansion = 3.0;
+                }
+
+                let pi = std::f64::consts::PI;
+                let phase_slider = egui::Slider::from_get_set(-pi..=pi, move |new_val| {
+                    if let Some(v) = new_val {
+                        setter.begin_set_parameter(phase_param);
+                        setter.set_parameter(phase_param, v as f32);
+                        setter.end_set_parameter(phase_param);
+                        v
+                    } else {
+                        phase_param.value() as f64
+                    }
+                })
+                .show_value(false);
+
+                let engine2 = engine.clone();
+                let phase_resp = ui.add_sized([col_w - 4.0, phase_slider_h], phase_slider);
+
+                // ── Label ──
                 ui.label(
-                    RichText::new(format!("{:.2}\nH{}", param.value(), sub_idx + 1))
-                        .size(9.0)
-                        .color(Color32::WHITE),
+                    RichText::new(format!(
+                        "{:.2}\n{:.2}\nH{}",
+                        amp_param.value(),
+                        phase_param.value(),
+                        sub_idx + 1
+                    ))
+                    .size(9.0)
+                    .color(Color32::WHITE),
                 );
 
-                if response.drag_stopped() {
+                if amp_resp.drag_stopped() {
                     engine.fill_nested_fourier_curve(harmonic_idx);
+                    params_changed_action();
+                }
+                if phase_resp.drag_stopped() {
+                    engine2.fill_nested_fourier_curve(harmonic_idx);
                     params_changed_action();
                 }
             });

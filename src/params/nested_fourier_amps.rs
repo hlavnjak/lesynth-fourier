@@ -43,7 +43,7 @@ pub struct NestedFourierAmps {
 impl NestedFourierAmps {
     pub fn new(harmonic_idx: usize) -> Self {
         let h = harmonic_idx + 1;
-        let range = FloatRange::Linear { min: -1.0, max: 1.0 };
+        let range = FloatRange::Linear { min: 0.0, max: 1.0 };
         NestedFourierAmps {
             sub_1:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 1"),  0.0, range),
             sub_2:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 2"),  0.0, range),

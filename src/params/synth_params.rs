@@ -17,7 +17,7 @@ use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
 
 use crate::constants::*;
-use super::{CurveType, GranularityLevel, HarmonicParam, NestedFourierAmps};
+use super::{CurveType, GranularityLevel, HarmonicParam, NestedFourierAmps, NestedFourierPhases};
 
 #[derive(Params)]
 pub struct LeSynthParams {
@@ -133,6 +133,7 @@ impl Default for LeSynthParams {
                     wobble_freq_range,
                 ),
                 nested_fourier_amps: Arc::new(NestedFourierAmps::new(i)),
+                nested_fourier_phases: Arc::new(NestedFourierPhases::new(i)),
             }
         });
 
