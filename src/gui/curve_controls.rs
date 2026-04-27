@@ -19,21 +19,16 @@ use crate::params::{CurveType, GranularityLevel, HarmonicParam};
 
 fn style_slider(ui: &mut nih_plug_egui::egui::Ui) {
     use nih_plug_egui::egui::{Color32, Stroke};
-
     let style = ui.style_mut();
-
     style.visuals.widgets.inactive.bg_fill = Color32::from_gray(45);
     style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_gray(25));
     style.visuals.widgets.inactive.fg_stroke = Stroke::new(2.0, Color32::from_rgb(65, 115, 190));
-
     style.visuals.widgets.hovered.bg_fill = Color32::from_gray(50);
     style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_gray(30));
     style.visuals.widgets.hovered.fg_stroke = Stroke::new(2.0, Color32::from_rgb(85, 140, 220));
-
     style.visuals.widgets.active.bg_fill = Color32::from_gray(55);
     style.visuals.widgets.active.bg_stroke = Stroke::new(1.5, Color32::from_gray(35));
     style.visuals.widgets.active.fg_stroke = Stroke::new(2.5, Color32::from_rgb(100, 160, 240));
-
     style.visuals.widgets.inactive.expansion = 2.0;
     style.visuals.widgets.hovered.expansion = 3.0;
     style.visuals.widgets.active.expansion = 4.0;
@@ -41,28 +36,21 @@ fn style_slider(ui: &mut nih_plug_egui::egui::Ui) {
 
 fn style_other_controls(ui: &mut nih_plug_egui::egui::Ui) {
     use nih_plug_egui::egui::{Color32, Stroke};
-
     let style = ui.style_mut();
-
     style.visuals.widgets.inactive.bg_fill = Color32::from_gray(45);
     style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(65, 115, 190));
     style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_gray(200));
-
     style.visuals.widgets.hovered.bg_fill = Color32::from_gray(55);
     style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.5, Color32::from_rgb(85, 140, 220));
     style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_gray(220));
-
     style.visuals.widgets.active.bg_fill = Color32::from_gray(65);
     style.visuals.widgets.active.bg_stroke = Stroke::new(2.0, Color32::from_rgb(100, 160, 240));
     style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::from_gray(240));
-
     style.visuals.widgets.open.bg_fill = Color32::from_gray(60);
     style.visuals.widgets.open.bg_stroke = Stroke::new(2.0, Color32::from_rgb(120, 180, 255));
     style.visuals.widgets.open.fg_stroke = Stroke::new(1.0, Color32::from_gray(240));
-
     style.visuals.selection.bg_fill = Color32::from_rgb(80, 130, 200);
     style.visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(100, 160, 240));
-
     style.visuals.button_frame = true;
 }
 
@@ -93,17 +81,28 @@ pub fn draw_curve_controls(
         ),
     };
 
-    // Two columns: offset slider | enabled + granularity + curve type
-    let slider_col_w = (window_width * 0.65).max(1.0);
-    let controls_col_w = (window_width - slider_col_w).max(1.0);
+    // 4 columns: offset slider | enabled checkbox | granularity combo | curve type combo
+    let col0_w = window_width * 0.48;
+    let col1_w = window_width * 0.14;
+    let col2_w = window_width * 0.20;
+    let col3_w = (window_width - col0_w - col1_w - col2_w).max(1.0);
+
+    let x1 = col0_w;
+    let x2 = col0_w + col1_w;
+    let x3 = col0_w + col1_w + col2_w;
 
     let line_h = ui.spacing().interact_size.y;
     let vspace = ui.spacing().item_spacing.y;
-
-    let row_h = line_h * 3.0 + vspace * 4.0;
+    let row_h = line_h * 2.0 + vspace * 2.0;
 
     let (_id, row_rect) = ui.allocate_space(egui::vec2(window_width, row_h));
     let pad = egui::vec2(4.0, 2.0);
+
+    let make_rect = |x_start: f32, w: f32| -> egui::Rect {
+        let min = row_rect.min + egui::vec2(x_start, 0.0) + pad;
+        let size = egui::vec2(w, row_h) - pad * 2.0;
+        egui::Rect::from_min_size(min, size)
+    };
 
     let refill_after_drag = |engine: &SynthComputeEngine, chart_type: &ChartType| {
         match curve.value() {
@@ -116,14 +115,11 @@ pub fn draw_curve_controls(
         }
     };
 
-    // Column 0: Offset slider
+    // ── Col 0: Offset slider ──────────────────────────────────────────────────
     {
-        let min = row_rect.min + pad;
-        let size = egui::vec2(slider_col_w, row_h) - pad * 2.0;
-        let rect = egui::Rect::from_min_size(min, size);
         let mut col_ui = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(rect)
+                .max_rect(make_rect(0.0, col0_w))
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
 
@@ -153,9 +149,9 @@ pub fn draw_curve_controls(
 
         let response = col_ui.add(slider);
         col_ui.label(
-            nih_plug_egui::egui::RichText::new(format!("{:.3} Offset", offset.value() as f64))
+            nih_plug_egui::egui::RichText::new(format!("{:.3} Offset", offset.value()))
                 .strong()
-                .color(nih_plug_egui::egui::Color32::WHITE)
+                .color(nih_plug_egui::egui::Color32::WHITE),
         );
 
         if response.drag_stopped() {
@@ -164,14 +160,11 @@ pub fn draw_curve_controls(
         }
     }
 
-    // Column 1: Enabled checkbox + Granularity combo + CurveType combo
+    // ── Col 1: Enabled checkbox ───────────────────────────────────────────────
     {
-        let min = row_rect.min + egui::vec2(slider_col_w, 0.0) + pad;
-        let size = egui::vec2(controls_col_w, row_h) - pad * 2.0;
-        let rect = egui::Rect::from_min_size(min, size);
         let mut col_ui = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(rect)
+                .max_rect(make_rect(x1, col1_w))
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
 
@@ -190,11 +183,13 @@ pub fn draw_curve_controls(
                     .lock()
                     .unwrap(),
             };
-
-            col_ui.checkbox(&mut enabled[idx],
-                nih_plug_egui::egui::RichText::new("Enabled")
-                    .color(nih_plug_egui::egui::Color32::WHITE)
-            ).changed()
+            col_ui
+                .checkbox(
+                    &mut enabled[idx],
+                    nih_plug_egui::egui::RichText::new("Enabled")
+                        .color(nih_plug_egui::egui::Color32::WHITE),
+                )
+                .changed()
         };
 
         if changed {
@@ -202,9 +197,21 @@ pub fn draw_curve_controls(
             synth_compute_engine.update_assembled_chart_with_key24();
             params_changed_action();
         }
+    }
+
+    // ── Col 2: Granularity combo ──────────────────────────────────────────────
+    {
+        let mut col_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(make_rect(x2, col2_w))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+
+        style_other_controls(&mut col_ui);
 
         let granularity_combo_id = format!("{:?}_granularity_combo_{}", chart_type, idx);
         egui::ComboBox::from_id_salt(granularity_combo_id)
+            .width(col2_w - 8.0)
             .selected_text(
                 nih_plug_egui::egui::RichText::new(match granularity.value() {
                     GranularityLevel::UltraLow => "Max: 0.025",
@@ -213,7 +220,7 @@ pub fn draw_curve_controls(
                     GranularityLevel::Medium    => "Max: 0.5",
                     GranularityLevel::High      => "Max: 1.0",
                 })
-                .color(nih_plug_egui::egui::Color32::WHITE)
+                .color(nih_plug_egui::egui::Color32::WHITE),
             )
             .show_ui(&mut col_ui, |ui| {
                 style_other_controls(ui);
@@ -233,12 +240,24 @@ pub fn draw_curve_controls(
                     }
                 }
             });
+    }
+
+    // ── Col 3: Curve type combo ───────────────────────────────────────────────
+    {
+        let mut col_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(make_rect(x3, col3_w))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+
+        style_other_controls(&mut col_ui);
 
         let combo_id = format!("{:?}_curve_type_combo_{}", chart_type, idx);
         egui::ComboBox::from_id_salt(combo_id)
+            .width(col3_w - 8.0)
             .selected_text(
                 nih_plug_egui::egui::RichText::new(format!("{:?}", curve.value()))
-                    .color(nih_plug_egui::egui::Color32::WHITE)
+                    .color(nih_plug_egui::egui::Color32::WHITE),
             )
             .show_ui(&mut col_ui, |ui| {
                 style_other_controls(ui);

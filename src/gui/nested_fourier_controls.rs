@@ -46,6 +46,14 @@ pub fn draw_nested_fourier_controls(
             ui.vertical(|ui| {
                 ui.set_width(col_w);
 
+                // Sub-harmonic caption
+                ui.label(
+                    RichText::new(format!("H{}", sub_idx + 1))
+                        .size(10.0)
+                        .strong()
+                        .color(Color32::from_rgb(140, 180, 255)),
+                );
+
                 // Amp slider (vertical)
                 {
                     let style = ui.style_mut();
@@ -113,13 +121,12 @@ pub fn draw_nested_fourier_controls(
 
                 ui.label(
                     RichText::new(format!(
-                        "{:.2}\n{:.2}\nH{}",
+                        "A{:.2}\nφ{:.2}",
                         amp_param.value(),
                         phase_param.value(),
-                        sub_idx + 1
                     ))
                     .size(9.0)
-                    .color(Color32::WHITE),
+                    .color(Color32::from_gray(190)),
                 );
 
                 if amp_resp.drag_stopped() {
