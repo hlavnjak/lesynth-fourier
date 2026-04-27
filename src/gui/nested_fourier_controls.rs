@@ -77,10 +77,14 @@ pub fn draw_nested_fourier_controls(
 
     // ── 16 columns: each column has a vertical amp slider + horizontal phase slider ──
     let amp_slider_h = 80.0;
-    let phase_slider_h = 16.0;
-    let col_w = (window_width / NUM_NESTED_FOURIER_HARMONICS as f32).max(28.0);
+    let phase_slider_h = 20.0;
+    let col_w = 56.0_f32;
     let gran_max = synth_params.harmonics[selected].granularity_amp.value().as_f64();
 
+    egui::ScrollArea::horizontal()
+        .id_salt("nf_scroll")
+        .max_width(window_width)
+        .show(ui, |ui| {
     ui.horizontal(|ui| {
         for sub_idx in 0..NUM_NESTED_FOURIER_HARMONICS {
             let amp_param   = synth_params.harmonics[selected].nested_fourier_amps.get(sub_idx);
@@ -178,5 +182,6 @@ pub fn draw_nested_fourier_controls(
                 }
             });
         }
-    });
+    }); // horizontal
+    }); // ScrollArea
 }

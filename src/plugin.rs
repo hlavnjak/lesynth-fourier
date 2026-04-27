@@ -352,7 +352,7 @@ impl Plugin for LeSynth {
                             &synth_compute_engine,
                             window_width - 1.5*gutter,
                             window_height,
-                            8.0,
+                            1.0,
                         );
 
 
