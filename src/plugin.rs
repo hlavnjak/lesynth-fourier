@@ -268,75 +268,117 @@ impl Plugin for LeSynth {
                             .max_width(window_width)
                             .show(ui, |ui| {
                                 for (idx, harmonic) in synth_params.harmonics.iter().enumerate() {
-                                    ui.label(
-                                        egui::RichText::new(format!("Parameters for {}th harmonic:", idx + 1))
-                                            .strong()
-                                            .size(16.0)
-                                    );
-                                    ui.add_space(15.0);
-                                    ui.label(
-                                        egui::RichText::new("Amplitude Chart:")
-                                            .strong()
-                                            .size(13.0)
-                                    );
-                                    draw_curve_controls(
-                                        ui,
-                                        idx,
-                                        ChartType::Amp,
-                                        harmonic,
-                                        synth_compute_engine.clone(),
-                                        setter,
-                                        &params_changed_action,
-                                        MIN_OFFSET_AMP,
-                                        MAX_OFFSET_AMP,
-                                        MIN_AMP_SINE_AMP,
-                                        MAX_AMP_SINE_AMP,
-                                        window_width,
-                                    );
+                                    // ── Harmonic header ───────────────────────────────────────
+                                    egui::Frame::new()
+                                        .fill(egui::Color32::from_gray(58))
+                                        .inner_margin(egui::Margin::same(6i8))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!("Parameters for {}th harmonic:", idx + 1))
+                                                    .strong()
+                                                    .size(16.0)
+                                                    .color(egui::Color32::WHITE),
+                                            );
+                                        });
 
-                                    ui.label(
-                                        egui::RichText::new("Phase Chart:")
-                                            .strong()
-                                            .size(13.0)
-                                    );
-                                    draw_curve_controls(
-                                        ui,
-                                        idx,
-                                        ChartType::Phase,
-                                        harmonic,
-                                        synth_compute_engine.clone(),
-                                        setter,
-                                        &params_changed_action,
-                                        MIN_OFFSET_PHASE,
-                                        MAX_OFFSET_PHASE,
-                                        MIN_PHASE_SINE_AMP,
-                                        MAX_PHASE_SINE_AMP,
-                                        window_width,
-                                    );
+                                    // ── Amplitude Chart ───────────────────────────────────────
+                                    egui::Frame::new()
+                                        .fill(egui::Color32::from_rgb(35, 52, 46))
+                                        .inner_margin(egui::Margin::same(4i8))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new("Amplitude Chart:")
+                                                    .strong()
+                                                    .size(13.0)
+                                                    .color(egui::Color32::WHITE),
+                                            );
+                                        });
 
-                                    ui.separator();
+                                    egui::Frame::new()
+                                        .fill(egui::Color32::from_gray(30))
+                                        .inner_margin(egui::Margin::same(4i8))
+                                        .show(ui, |ui| {
+                                            draw_curve_controls(
+                                                ui,
+                                                idx,
+                                                ChartType::Amp,
+                                                harmonic,
+                                                synth_compute_engine.clone(),
+                                                setter,
+                                                &params_changed_action,
+                                                MIN_OFFSET_AMP,
+                                                MAX_OFFSET_AMP,
+                                                window_width - 8.0,
+                                            );
+                                        });
+
+                                    egui::Frame::new()
+                                        .fill(egui::Color32::from_rgb(18, 25, 45))
+                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 80, 140)))
+                                        .inner_margin(egui::Margin::same(6i8))
+                                        .show(ui, |ui| {
+                                            draw_nested_fourier_controls(
+                                                ui,
+                                                idx,
+                                                harmonic,
+                                                synth_compute_engine.clone(),
+                                                setter,
+                                                &params_changed_action,
+                                                window_width - 12.0,
+                                            );
+                                        });
+
+                                    // ── Phase Chart ───────────────────────────────────────────
+                                    egui::Frame::new()
+                                        .fill(egui::Color32::from_rgb(48, 35, 55))
+                                        .inner_margin(egui::Margin::same(4i8))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new("Phase Chart:")
+                                                    .strong()
+                                                    .size(13.0)
+                                                    .color(egui::Color32::WHITE),
+                                            );
+                                        });
+
+                                    egui::Frame::new()
+                                        .fill(egui::Color32::from_gray(30))
+                                        .inner_margin(egui::Margin::same(4i8))
+                                        .show(ui, |ui| {
+                                            draw_curve_controls(
+                                                ui,
+                                                idx,
+                                                ChartType::Phase,
+                                                harmonic,
+                                                synth_compute_engine.clone(),
+                                                setter,
+                                                &params_changed_action,
+                                                MIN_OFFSET_PHASE,
+                                                MAX_OFFSET_PHASE,
+                                                window_width - 8.0,
+                                            );
+                                        });
+
+                                    egui::Frame::new()
+                                        .fill(egui::Color32::from_rgb(18, 25, 45))
+                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 80, 140)))
+                                        .inner_margin(egui::Margin::same(6i8))
+                                        .show(ui, |ui| {
+                                            draw_nested_fourier_controls(
+                                                ui,
+                                                idx,
+                                                harmonic,
+                                                synth_compute_engine.clone(),
+                                                setter,
+                                                &params_changed_action,
+                                                window_width - 12.0,
+                                            );
+                                        });
+
+                                    ui.add_space(4.0);
                                 }
                             });
 
-
-                        ui.add_space(8.0);
-
-                        // ── Nested Fourier sub-harmonic control panel ──────────────────
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_gray(60))
-                            .inner_margin(egui::Margin::same(6i8))
-                            .show(ui, |ui| {
-                                ui.set_max_height(window_height * 0.1);
-                                ui.set_max_width(window_width);
-                                draw_nested_fourier_controls(
-                                    ui,
-                                    &synth_params,
-                                    synth_compute_engine.clone(),
-                                    setter,
-                                    &params_changed_action,
-                                    window_width - 12.0,
-                                );
-                            });
 
                         ui.add_space(8.0);
 

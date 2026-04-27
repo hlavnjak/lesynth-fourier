@@ -14,13 +14,13 @@
 
 use std::sync::Arc;
 use nih_plug::prelude::ParamSetter;
-use crate::constants::NUM_HARMONICS;
 use crate::engine::SynthComputeEngine;
-use crate::params::{LeSynthParams, NUM_NESTED_FOURIER_HARMONICS};
+use crate::params::{HarmonicParam, NUM_NESTED_FOURIER_HARMONICS};
 
 pub fn draw_nested_fourier_controls(
     ui: &mut nih_plug_egui::egui::Ui,
-    synth_params: &LeSynthParams,
+    harmonic_idx: usize,
+    harmonic: &HarmonicParam,
     synth_compute_engine: Arc<SynthComputeEngine>,
     setter: &ParamSetter,
     params_changed_action: &dyn Fn(),
@@ -28,74 +28,25 @@ pub fn draw_nested_fourier_controls(
 ) {
     use nih_plug_egui::egui::{self, Color32, RichText, Stroke};
 
-    let selected_id = egui::Id::new("nf_selected_harmonic");
-    let mut selected: usize = ui.ctx().memory_mut(|mem| {
-        *mem.data.get_temp_mut_or_insert_with(selected_id, || 0usize)
-    });
-
-    // ── Header row: label + target-harmonic combo ──────────────────────────
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("Nested Fourier Sub-Harmonics  |  Target:")
-                .strong()
-                .size(13.0)
-                .color(Color32::WHITE),
-        );
-
-        {
-            let style = ui.style_mut();
-            style.visuals.widgets.inactive.bg_fill = Color32::from_gray(45);
-            style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(65, 115, 190));
-            style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_gray(200));
-            style.visuals.widgets.hovered.bg_fill = Color32::from_gray(55);
-            style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.5, Color32::from_rgb(85, 140, 220));
-            style.visuals.widgets.open.bg_fill = Color32::from_gray(60);
-            style.visuals.widgets.open.bg_stroke = Stroke::new(2.0, Color32::from_rgb(120, 180, 255));
-            style.visuals.selection.bg_fill = Color32::from_rgb(80, 130, 200);
-        }
-
-        egui::ComboBox::from_id_salt("nf_target_harmonic_combo")
-            .selected_text(
-                RichText::new(format!("Harmonic {}", selected + 1)).color(Color32::WHITE),
-            )
-            .show_ui(ui, |ui| {
-                for i in 0..NUM_HARMONICS {
-                    if ui
-                        .selectable_label(selected == i, format!("Harmonic {}", i + 1))
-                        .clicked()
-                    {
-                        selected = i;
-                    }
-                }
-            });
-    });
-
-    // Persist selection
-    ui.ctx().memory_mut(|mem| {
-        mem.data.insert_temp(selected_id, selected);
-    });
-
-    // ── 16 columns: each column has a vertical amp slider + horizontal phase slider ──
     let amp_slider_h = 80.0;
     let phase_slider_h = 20.0;
     let col_w = 56.0_f32;
-    let gran_max = synth_params.harmonics[selected].granularity_amp.value().as_f64();
+    let gran_max = harmonic.granularity_amp.value().as_f64();
 
     egui::ScrollArea::horizontal()
-        .id_salt("nf_scroll")
+        .id_salt(format!("nf_scroll_{}_{}", harmonic_idx, ui.id().value()))
         .max_width(window_width)
         .show(ui, |ui| {
     ui.horizontal(|ui| {
         for sub_idx in 0..NUM_NESTED_FOURIER_HARMONICS {
-            let amp_param   = synth_params.harmonics[selected].nested_fourier_amps.get(sub_idx);
-            let phase_param = synth_params.harmonics[selected].nested_fourier_phases.get(sub_idx);
+            let amp_param   = harmonic.nested_fourier_amps.get(sub_idx);
+            let phase_param = harmonic.nested_fourier_phases.get(sub_idx);
             let engine = synth_compute_engine.clone();
-            let harmonic_idx = selected;
 
             ui.vertical(|ui| {
                 ui.set_width(col_w);
 
-                // ── Amp slider (vertical, 0..=gran_max) ──
+                // Amp slider (vertical)
                 {
                     let style = ui.style_mut();
                     style.visuals.widgets.inactive.bg_fill = Color32::from_gray(45);
@@ -127,7 +78,7 @@ pub fn draw_nested_fourier_controls(
 
                 let amp_resp = ui.add_sized([col_w - 4.0, amp_slider_h], amp_slider);
 
-                // ── Phase slider (horizontal, -π..=π) ──
+                // Phase slider (horizontal)
                 {
                     let style = ui.style_mut();
                     style.visuals.widgets.inactive.bg_fill = Color32::from_gray(40);
@@ -160,7 +111,6 @@ pub fn draw_nested_fourier_controls(
                 let engine2 = engine.clone();
                 let phase_resp = ui.add_sized([col_w - 4.0, phase_slider_h], phase_slider);
 
-                // ── Label ──
                 ui.label(
                     RichText::new(format!(
                         "{:.2}\n{:.2}\nH{}",

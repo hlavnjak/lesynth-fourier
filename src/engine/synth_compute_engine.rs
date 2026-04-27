@@ -127,17 +127,18 @@ impl SynthComputeEngine {
     }
 
     /// Fill harmonic n's amplitude data using a Fourier series of 16 sub-harmonics.
-    /// A(bucket) = clamp( Σ_{k=1}^{16} amp_k * sin(2π * k * t + phase_k), 0, 1 )
+    /// A(bucket) = clamp( offset + Σ_{k=1}^{16} amp_k * sin(2π * k * t + phase_k), 0, 1 )
     pub fn fill_nested_fourier_curve(&self, n: usize) {
         let sub_amps = self.synth_params.harmonics[n].nested_fourier_amps.values();
         let sub_phases = self.synth_params.harmonics[n].nested_fourier_phases.values();
+        let offset = self.synth_params.harmonics[n].curve_offset_amp.value() as f64;
 
         let mut data = self.shared_params.amplitude_data.lock().unwrap();
         let num_buckets = data[n].len();
 
         for bucket in 0..num_buckets {
             let t = bucket as f64 / num_buckets as f64;
-            let mut value = 0.0f64;
+            let mut value = offset;
             for (k, (&amp, &phase)) in sub_amps.iter().zip(sub_phases.iter()).enumerate() {
                 value += amp as f64
                     * (2.0 * std::f64::consts::PI * (k + 1) as f64 * t + phase as f64).sin();

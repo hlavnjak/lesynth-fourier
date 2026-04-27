@@ -17,16 +17,14 @@ use nih_plug::prelude::*;
 #[derive(Debug, Clone, Copy, PartialEq, Enum)]
 pub enum CurveType {
     Constant,
-    Sine,
     #[name = "Nested Fourier"]
     NestedFourier,
 }
 
 impl CurveType {
     // so we can write `for variant in CurveType::VARIANTS`
-    pub const VARIANTS: [CurveType; 3] = [
+    pub const VARIANTS: [CurveType; 2] = [
         CurveType::Constant,
-        CurveType::Sine,
         CurveType::NestedFourier,
     ];
 }
@@ -69,6 +67,12 @@ impl GranularityLevel {
     }
 }
 
+impl Default for CurveType {
+    fn default() -> Self {
+        CurveType::NestedFourier
+    }
+}
+
 impl Default for GranularityLevel {
     fn default() -> Self {
         GranularityLevel::Low
@@ -81,21 +85,20 @@ mod tests {
 
     #[test]
     fn test_curve_type_variants() {
-        assert_eq!(CurveType::VARIANTS.len(), 3);
+        assert_eq!(CurveType::VARIANTS.len(), 2);
         assert_eq!(CurveType::VARIANTS[0], CurveType::Constant);
-        assert_eq!(CurveType::VARIANTS[1], CurveType::Sine);
-        assert_eq!(CurveType::VARIANTS[2], CurveType::NestedFourier);
+        assert_eq!(CurveType::VARIANTS[1], CurveType::NestedFourier);
     }
 
     #[test]
     fn test_curve_type_debug() {
         assert_eq!(format!("{:?}", CurveType::Constant), "Constant");
-        assert_eq!(format!("{:?}", CurveType::Sine), "Sine");
+        assert_eq!(format!("{:?}", CurveType::NestedFourier), "NestedFourier");
     }
 
     #[test]
     fn test_curve_type_clone() {
-        let original = CurveType::Sine;
+        let original = CurveType::NestedFourier;
         let cloned = original.clone();
         assert_eq!(original, cloned);
     }
@@ -103,8 +106,8 @@ mod tests {
     #[test]
     fn test_curve_type_equality() {
         assert_eq!(CurveType::Constant, CurveType::Constant);
-        assert_ne!(CurveType::Constant, CurveType::Sine);
-        assert_eq!(CurveType::Sine, CurveType::Sine);
+        assert_ne!(CurveType::Constant, CurveType::NestedFourier);
+        assert_eq!(CurveType::NestedFourier, CurveType::NestedFourier);
     }
 
     #[test]
