@@ -320,6 +320,7 @@ impl Plugin for LeSynth {
                                             draw_nested_fourier_controls(
                                                 ui,
                                                 idx,
+                                                ChartType::Amp,
                                                 harmonic,
                                                 synth_compute_engine.clone(),
                                                 setter,
@@ -367,6 +368,7 @@ impl Plugin for LeSynth {
                                             draw_nested_fourier_controls(
                                                 ui,
                                                 idx,
+                                                ChartType::Phase,
                                                 harmonic,
                                                 synth_compute_engine.clone(),
                                                 setter,

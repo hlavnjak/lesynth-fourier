@@ -51,8 +51,14 @@ pub struct HarmonicParam {
     pub wobble_amp_phase: FloatParam,
     #[id = "wobble_freq_phase"]
     pub wobble_freq_phase: FloatParam,
+    // ── Amplitude-chart Nested Fourier series ─────────────────────────────────
     #[nested(group = "nested_fourier")]
     pub nested_fourier_amps: Arc<NestedFourierAmps>,
     #[nested(group = "nested_fourier_phases")]
     pub nested_fourier_phases: Arc<NestedFourierPhases>,
+    // ── Phase-chart Nested Fourier series (independent set) ───────────────────
+    #[nested(id_prefix = "pnf_amp", group = "nested_fourier_phasechart_amps")]
+    pub nested_fourier_amps_p: Arc<NestedFourierAmps>,
+    #[nested(id_prefix = "pnf_ph", group = "nested_fourier_phasechart_phases")]
+    pub nested_fourier_phases_p: Arc<NestedFourierPhases>,
 }

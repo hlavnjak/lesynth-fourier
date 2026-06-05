@@ -14,23 +14,23 @@
 
 use nih_plug::prelude::*;
 
-pub const NUM_NESTED_FOURIER_HARMONICS: usize = 16;
+pub const NUM_NESTED_FOURIER_HARMONICS: usize = 32;
 
-/// 16 sub-harmonic amplitude parameters used by the NestedFourier curve type.
-/// The amplitude envelope across buckets is computed as:
-///   A(t) = clamp( Σ_{k=1}^{16} sub_k * sin(2π * k * t), 0, 1 )
-/// where t = bucket / num_buckets.
+/// Sub-harmonic amplitude parameters used by the NestedFourier curve type.
+/// The envelope across buckets is computed as:
+///   V(t) = offset + Sum_{k=1}^{N} sub_k * sin(2*pi * k * t + phase_k)
+/// where t = bucket / num_buckets (amplitude charts clamp the result to [0, 1]).
 #[derive(Params)]
 pub struct NestedFourierAmps {
-    #[id = "nf_1"]  pub sub_1:  FloatParam,
-    #[id = "nf_2"]  pub sub_2:  FloatParam,
-    #[id = "nf_3"]  pub sub_3:  FloatParam,
-    #[id = "nf_4"]  pub sub_4:  FloatParam,
-    #[id = "nf_5"]  pub sub_5:  FloatParam,
-    #[id = "nf_6"]  pub sub_6:  FloatParam,
-    #[id = "nf_7"]  pub sub_7:  FloatParam,
-    #[id = "nf_8"]  pub sub_8:  FloatParam,
-    #[id = "nf_9"]  pub sub_9:  FloatParam,
+    #[id = "nf_1"] pub sub_1: FloatParam,
+    #[id = "nf_2"] pub sub_2: FloatParam,
+    #[id = "nf_3"] pub sub_3: FloatParam,
+    #[id = "nf_4"] pub sub_4: FloatParam,
+    #[id = "nf_5"] pub sub_5: FloatParam,
+    #[id = "nf_6"] pub sub_6: FloatParam,
+    #[id = "nf_7"] pub sub_7: FloatParam,
+    #[id = "nf_8"] pub sub_8: FloatParam,
+    #[id = "nf_9"] pub sub_9: FloatParam,
     #[id = "nf_10"] pub sub_10: FloatParam,
     #[id = "nf_11"] pub sub_11: FloatParam,
     #[id = "nf_12"] pub sub_12: FloatParam,
@@ -38,6 +38,22 @@ pub struct NestedFourierAmps {
     #[id = "nf_14"] pub sub_14: FloatParam,
     #[id = "nf_15"] pub sub_15: FloatParam,
     #[id = "nf_16"] pub sub_16: FloatParam,
+    #[id = "nf_17"] pub sub_17: FloatParam,
+    #[id = "nf_18"] pub sub_18: FloatParam,
+    #[id = "nf_19"] pub sub_19: FloatParam,
+    #[id = "nf_20"] pub sub_20: FloatParam,
+    #[id = "nf_21"] pub sub_21: FloatParam,
+    #[id = "nf_22"] pub sub_22: FloatParam,
+    #[id = "nf_23"] pub sub_23: FloatParam,
+    #[id = "nf_24"] pub sub_24: FloatParam,
+    #[id = "nf_25"] pub sub_25: FloatParam,
+    #[id = "nf_26"] pub sub_26: FloatParam,
+    #[id = "nf_27"] pub sub_27: FloatParam,
+    #[id = "nf_28"] pub sub_28: FloatParam,
+    #[id = "nf_29"] pub sub_29: FloatParam,
+    #[id = "nf_30"] pub sub_30: FloatParam,
+    #[id = "nf_31"] pub sub_31: FloatParam,
+    #[id = "nf_32"] pub sub_32: FloatParam,
 }
 
 impl NestedFourierAmps {
@@ -45,15 +61,15 @@ impl NestedFourierAmps {
         let h = harmonic_idx + 1;
         let range = FloatRange::Linear { min: 0.0, max: 1.0 };
         NestedFourierAmps {
-            sub_1:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 1"),  0.0, range),
-            sub_2:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 2"),  0.0, range),
-            sub_3:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 3"),  0.0, range),
-            sub_4:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 4"),  0.0, range),
-            sub_5:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 5"),  0.0, range),
-            sub_6:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 6"),  0.0, range),
-            sub_7:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 7"),  0.0, range),
-            sub_8:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 8"),  0.0, range),
-            sub_9:  FloatParam::new(&format!("H{h} NF Sub-Harmonic 9"),  0.0, range),
+            sub_1: FloatParam::new(&format!("H{h} NF Sub-Harmonic 1"), 0.0, range),
+            sub_2: FloatParam::new(&format!("H{h} NF Sub-Harmonic 2"), 0.0, range),
+            sub_3: FloatParam::new(&format!("H{h} NF Sub-Harmonic 3"), 0.0, range),
+            sub_4: FloatParam::new(&format!("H{h} NF Sub-Harmonic 4"), 0.0, range),
+            sub_5: FloatParam::new(&format!("H{h} NF Sub-Harmonic 5"), 0.0, range),
+            sub_6: FloatParam::new(&format!("H{h} NF Sub-Harmonic 6"), 0.0, range),
+            sub_7: FloatParam::new(&format!("H{h} NF Sub-Harmonic 7"), 0.0, range),
+            sub_8: FloatParam::new(&format!("H{h} NF Sub-Harmonic 8"), 0.0, range),
+            sub_9: FloatParam::new(&format!("H{h} NF Sub-Harmonic 9"), 0.0, range),
             sub_10: FloatParam::new(&format!("H{h} NF Sub-Harmonic 10"), 0.0, range),
             sub_11: FloatParam::new(&format!("H{h} NF Sub-Harmonic 11"), 0.0, range),
             sub_12: FloatParam::new(&format!("H{h} NF Sub-Harmonic 12"), 0.0, range),
@@ -61,10 +77,25 @@ impl NestedFourierAmps {
             sub_14: FloatParam::new(&format!("H{h} NF Sub-Harmonic 14"), 0.0, range),
             sub_15: FloatParam::new(&format!("H{h} NF Sub-Harmonic 15"), 0.0, range),
             sub_16: FloatParam::new(&format!("H{h} NF Sub-Harmonic 16"), 0.0, range),
+            sub_17: FloatParam::new(&format!("H{h} NF Sub-Harmonic 17"), 0.0, range),
+            sub_18: FloatParam::new(&format!("H{h} NF Sub-Harmonic 18"), 0.0, range),
+            sub_19: FloatParam::new(&format!("H{h} NF Sub-Harmonic 19"), 0.0, range),
+            sub_20: FloatParam::new(&format!("H{h} NF Sub-Harmonic 20"), 0.0, range),
+            sub_21: FloatParam::new(&format!("H{h} NF Sub-Harmonic 21"), 0.0, range),
+            sub_22: FloatParam::new(&format!("H{h} NF Sub-Harmonic 22"), 0.0, range),
+            sub_23: FloatParam::new(&format!("H{h} NF Sub-Harmonic 23"), 0.0, range),
+            sub_24: FloatParam::new(&format!("H{h} NF Sub-Harmonic 24"), 0.0, range),
+            sub_25: FloatParam::new(&format!("H{h} NF Sub-Harmonic 25"), 0.0, range),
+            sub_26: FloatParam::new(&format!("H{h} NF Sub-Harmonic 26"), 0.0, range),
+            sub_27: FloatParam::new(&format!("H{h} NF Sub-Harmonic 27"), 0.0, range),
+            sub_28: FloatParam::new(&format!("H{h} NF Sub-Harmonic 28"), 0.0, range),
+            sub_29: FloatParam::new(&format!("H{h} NF Sub-Harmonic 29"), 0.0, range),
+            sub_30: FloatParam::new(&format!("H{h} NF Sub-Harmonic 30"), 0.0, range),
+            sub_31: FloatParam::new(&format!("H{h} NF Sub-Harmonic 31"), 0.0, range),
+            sub_32: FloatParam::new(&format!("H{h} NF Sub-Harmonic 32"), 0.0, range),
         }
     }
 
-    /// Get a reference to sub-harmonic parameter by index (0-based).
     pub fn get(&self, i: usize) -> &FloatParam {
         match i {
             0  => &self.sub_1,
@@ -83,29 +114,36 @@ impl NestedFourierAmps {
             13 => &self.sub_14,
             14 => &self.sub_15,
             15 => &self.sub_16,
+            16 => &self.sub_17,
+            17 => &self.sub_18,
+            18 => &self.sub_19,
+            19 => &self.sub_20,
+            20 => &self.sub_21,
+            21 => &self.sub_22,
+            22 => &self.sub_23,
+            23 => &self.sub_24,
+            24 => &self.sub_25,
+            25 => &self.sub_26,
+            26 => &self.sub_27,
+            27 => &self.sub_28,
+            28 => &self.sub_29,
+            29 => &self.sub_30,
+            30 => &self.sub_31,
+            31 => &self.sub_32,
             _  => panic!("NestedFourierAmps index out of bounds: {}", i),
         }
     }
 
-    /// Return all 16 current values as an array.
     pub fn values(&self) -> [f32; NUM_NESTED_FOURIER_HARMONICS] {
         [
-            self.sub_1.value(),
-            self.sub_2.value(),
-            self.sub_3.value(),
-            self.sub_4.value(),
-            self.sub_5.value(),
-            self.sub_6.value(),
-            self.sub_7.value(),
-            self.sub_8.value(),
-            self.sub_9.value(),
-            self.sub_10.value(),
-            self.sub_11.value(),
-            self.sub_12.value(),
-            self.sub_13.value(),
-            self.sub_14.value(),
-            self.sub_15.value(),
-            self.sub_16.value(),
+            self.sub_1.value(), self.sub_2.value(), self.sub_3.value(), self.sub_4.value(),
+            self.sub_5.value(), self.sub_6.value(), self.sub_7.value(), self.sub_8.value(),
+            self.sub_9.value(), self.sub_10.value(), self.sub_11.value(), self.sub_12.value(),
+            self.sub_13.value(), self.sub_14.value(), self.sub_15.value(), self.sub_16.value(),
+            self.sub_17.value(), self.sub_18.value(), self.sub_19.value(), self.sub_20.value(),
+            self.sub_21.value(), self.sub_22.value(), self.sub_23.value(), self.sub_24.value(),
+            self.sub_25.value(), self.sub_26.value(), self.sub_27.value(), self.sub_28.value(),
+            self.sub_29.value(), self.sub_30.value(), self.sub_31.value(), self.sub_32.value(),
         ]
     }
 }

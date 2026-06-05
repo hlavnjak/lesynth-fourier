@@ -106,12 +106,8 @@ pub fn draw_curve_controls(
 
     let refill_after_drag = |engine: &SynthComputeEngine, chart_type: &ChartType| {
         match curve.value() {
-            CurveType::Constant => engine.fill_constant_curve(idx, offset.value(), chart_type.clone()),
-            CurveType::NestedFourier => {
-                if matches!(chart_type, ChartType::Amp) {
-                    engine.fill_nested_fourier_curve(idx);
-                }
-            }
+            CurveType::Constant => engine.fill_constant_curve(idx, offset.value(), *chart_type),
+            CurveType::NestedFourier => engine.fill_nested_fourier_curve(idx, *chart_type),
         }
     };
 
@@ -214,6 +210,7 @@ pub fn draw_curve_controls(
             .width(col2_w - 8.0)
             .selected_text(
                 nih_plug_egui::egui::RichText::new(match granularity.value() {
+                    GranularityLevel::Micro     => "Max: 0.001",
                     GranularityLevel::UltraLow => "Max: 0.025",
                     GranularityLevel::VeryLow  => "Max: 0.05",
                     GranularityLevel::Low       => "Max: 0.1",
@@ -226,6 +223,7 @@ pub fn draw_curve_controls(
                 style_other_controls(ui);
                 for &variant in GranularityLevel::VARIANTS.iter() {
                     let label = match variant {
+                        GranularityLevel::Micro     => "Max: 0.001",
                         GranularityLevel::UltraLow => "Max: 0.025",
                         GranularityLevel::VeryLow  => "Max: 0.05",
                         GranularityLevel::Low       => "Max: 0.1",
@@ -273,12 +271,10 @@ pub fn draw_curve_controls(
                         match variant {
                             CurveType::Constant => {
                                 synth_compute_engine
-                                    .fill_constant_curve(idx, offset.value(), chart_type.clone());
+                                    .fill_constant_curve(idx, offset.value(), chart_type);
                             }
                             CurveType::NestedFourier => {
-                                if matches!(chart_type, ChartType::Amp) {
-                                    synth_compute_engine.fill_nested_fourier_curve(idx);
-                                }
+                                synth_compute_engine.fill_nested_fourier_curve(idx, chart_type);
                             }
                         }
 

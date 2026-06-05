@@ -126,14 +126,29 @@ impl SynthComputeEngine {
         self.update_assembled_chart_with_key24();
     }
 
-    /// Fill harmonic n's amplitude data using a Fourier series of 16 sub-harmonics.
-    /// A(bucket) = clamp( offset + Σ_{k=1}^{16} amp_k * sin(2π * k * t + phase_k), 0, 1 )
-    pub fn fill_nested_fourier_curve(&self, n: usize) {
-        let sub_amps = self.synth_params.harmonics[n].nested_fourier_amps.values();
-        let sub_phases = self.synth_params.harmonics[n].nested_fourier_phases.values();
-        let offset = self.synth_params.harmonics[n].curve_offset_amp.value() as f64;
+    /// Fill harmonic n's amplitude or phase data using a Fourier series of sub-harmonics.
+    /// V(bucket) = offset + Σ_{k=1}^{N} amp_k * sin(2π * k * t + phase_k)
+    /// The amplitude chart clamps the result to [0, 1]; the phase chart leaves it unclamped.
+    /// Each chart uses its own independent set of sub-harmonic parameters.
+    pub fn fill_nested_fourier_curve(&self, n: usize, chart_type: ChartType) {
+        let harmonic = &self.synth_params.harmonics[n];
+        let (sub_amps, sub_phases, offset) = match chart_type {
+            ChartType::Amp => (
+                harmonic.nested_fourier_amps.values(),
+                harmonic.nested_fourier_phases.values(),
+                harmonic.curve_offset_amp.value() as f64,
+            ),
+            ChartType::Phase => (
+                harmonic.nested_fourier_amps_p.values(),
+                harmonic.nested_fourier_phases_p.values(),
+                harmonic.curve_offset_phase.value() as f64,
+            ),
+        };
 
-        let mut data = self.shared_params.amplitude_data.lock().unwrap();
+        let mut data = match chart_type {
+            ChartType::Amp => self.shared_params.amplitude_data.lock().unwrap(),
+            ChartType::Phase => self.shared_params.phase_data.lock().unwrap(),
+        };
         let num_buckets = data[n].len();
 
         for bucket in 0..num_buckets {
@@ -143,7 +158,10 @@ impl SynthComputeEngine {
                 value += amp as f64
                     * (2.0 * std::f64::consts::PI * (k + 1) as f64 * t + phase as f64).sin();
             }
-            data[n][bucket] = value.clamp(0.0, 1.0) as f32;
+            data[n][bucket] = match chart_type {
+                ChartType::Amp => value.clamp(0.0, 1.0) as f32,
+                ChartType::Phase => value as f32,
+            };
         }
 
         self.set_normalization_needed(true);

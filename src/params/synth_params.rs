@@ -82,7 +82,7 @@ impl Default for LeSynthParams {
                 ),
                 curve_type_phase: EnumParam::new(
                     &format!("Harmonic {} Curve Type Phase", idx),
-                    default_curve,
+                    CurveType::Constant,
                 ),
                 sine_curve_amp_amp: FloatParam::new(
                     &format!("Harmonic {} Amplitude Of Sine Curve For Amplitude", idx),
@@ -134,6 +134,8 @@ impl Default for LeSynthParams {
                 ),
                 nested_fourier_amps: Arc::new(NestedFourierAmps::new(i)),
                 nested_fourier_phases: Arc::new(NestedFourierPhases::new(i)),
+                nested_fourier_amps_p: Arc::new(NestedFourierAmps::new(i)),
+                nested_fourier_phases_p: Arc::new(NestedFourierPhases::new(i)),
             }
         });
 

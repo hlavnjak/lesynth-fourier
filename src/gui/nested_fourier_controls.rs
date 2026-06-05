@@ -14,12 +14,24 @@
 
 use std::sync::Arc;
 use nih_plug::prelude::ParamSetter;
-use crate::engine::SynthComputeEngine;
-use crate::params::{HarmonicParam, NUM_NESTED_FOURIER_HARMONICS};
+use crate::engine::{ChartType, SynthComputeEngine};
+use crate::params::{GranularityLevel, HarmonicParam, NUM_NESTED_FOURIER_HARMONICS};
+
+fn gran_label(g: GranularityLevel) -> &'static str {
+    match g {
+        GranularityLevel::Micro    => "0.001",
+        GranularityLevel::UltraLow => "0.025",
+        GranularityLevel::VeryLow  => "0.05",
+        GranularityLevel::Low      => "0.1",
+        GranularityLevel::Medium   => "0.5",
+        GranularityLevel::High     => "1.0",
+    }
+}
 
 pub fn draw_nested_fourier_controls(
     ui: &mut nih_plug_egui::egui::Ui,
     harmonic_idx: usize,
+    chart_type: ChartType,
     harmonic: &HarmonicParam,
     synth_compute_engine: Arc<SynthComputeEngine>,
     setter: &ParamSetter,
@@ -28,20 +40,33 @@ pub fn draw_nested_fourier_controls(
 ) {
     use nih_plug_egui::egui::{self, Color32, RichText, Stroke};
 
+    // Each chart (amplitude / phase) drives its own independent Fourier series.
+    let (amps, phases) = match chart_type {
+        ChartType::Amp => (&harmonic.nested_fourier_amps, &harmonic.nested_fourier_phases),
+        ChartType::Phase => (&harmonic.nested_fourier_amps_p, &harmonic.nested_fourier_phases_p),
+    };
+
     let amp_slider_h = 80.0;
     let phase_slider_h = 20.0;
     let col_w = 56.0_f32;
-    let gran_max = harmonic.granularity_amp.value().as_f64();
 
     egui::ScrollArea::horizontal()
-        .id_salt(format!("nf_scroll_{}_{}", harmonic_idx, ui.id().value()))
+        .id_salt(format!("nf_scroll_{:?}_{}_{}", chart_type, harmonic_idx, ui.id().value()))
         .max_width(window_width)
         .show(ui, |ui| {
     ui.horizontal(|ui| {
         for sub_idx in 0..NUM_NESTED_FOURIER_HARMONICS {
-            let amp_param   = harmonic.nested_fourier_amps.get(sub_idx);
-            let phase_param = harmonic.nested_fourier_phases.get(sub_idx);
+            let amp_param   = amps.get(sub_idx);
+            let phase_param = phases.get(sub_idx);
             let engine = synth_compute_engine.clone();
+
+            // Per-slider granularity caps the amplitude slider's range. This is
+            // GUI-only state (kept in egui memory): it persists across frames but
+            // resets when the editor is reopened. The slider VALUE persists normally.
+            let gran_id = egui::Id::new(("nf_gran", chart_type, harmonic_idx, sub_idx));
+            let mut gran: GranularityLevel =
+                ui.data_mut(|d| d.get_temp(gran_id)).unwrap_or(GranularityLevel::High);
+            let gran_max = gran.as_f64();
 
             ui.vertical(|ui| {
                 ui.set_width(col_w);
@@ -71,20 +96,55 @@ pub fn draw_nested_fourier_controls(
                     style.visuals.widgets.active.expansion = 4.0;
                 }
 
-                let amp_slider = egui::Slider::from_get_set(0.0..=gran_max, move |new_val| {
-                    if let Some(v) = new_val {
-                        setter.begin_set_parameter(amp_param);
-                        setter.set_parameter(amp_param, v as f32);
-                        setter.end_set_parameter(amp_param);
-                        v
-                    } else {
-                        amp_param.value() as f64
-                    }
-                })
-                .vertical()
-                .show_value(false);
-
+                // Bind the slider directly to a local value (read once per frame) and
+                // push changes to the parameter on change. This avoids the inverted /
+                // jumpy behaviour that `Slider::from_get_set` exhibits for vertical
+                // sliders.
+                let mut amp_val = amp_param.value() as f64;
+                let amp_slider = egui::Slider::new(&mut amp_val, 0.0..=gran_max)
+                    .vertical()
+                    .show_value(false);
                 let amp_resp = ui.add_sized([col_w - 4.0, amp_slider_h], amp_slider);
+                if amp_resp.changed() {
+                    setter.begin_set_parameter(amp_param);
+                    setter.set_parameter(amp_param, amp_val as f32);
+                    setter.end_set_parameter(amp_param);
+                }
+
+                // Per-slider granularity selector (sets this slider's amplitude max).
+                {
+                    let style = ui.style_mut();
+                    style.visuals.widgets.inactive.bg_fill = Color32::from_gray(40);
+                    style.visuals.widgets.hovered.bg_fill = Color32::from_gray(48);
+                    style.visuals.widgets.active.bg_fill = Color32::from_gray(55);
+                }
+                egui::ComboBox::from_id_salt(("nf_gran_combo", chart_type, harmonic_idx, sub_idx))
+                    .width(col_w - 8.0)
+                    .selected_text(
+                        RichText::new(gran_label(gran))
+                            .size(9.0)
+                            .color(Color32::from_gray(200)),
+                    )
+                    .show_ui(ui, |ui| {
+                        for &variant in GranularityLevel::VARIANTS.iter() {
+                            if ui
+                                .selectable_label(gran == variant, gran_label(variant))
+                                .clicked()
+                            {
+                                gran = variant;
+                                ui.data_mut(|d| d.insert_temp(gran_id, variant));
+                                // Clamp the stored value down if it now exceeds the new max.
+                                let new_max = variant.as_f64() as f32;
+                                if amp_param.value() > new_max {
+                                    setter.begin_set_parameter(amp_param);
+                                    setter.set_parameter(amp_param, new_max);
+                                    setter.end_set_parameter(amp_param);
+                                    engine.fill_nested_fourier_curve(harmonic_idx, chart_type);
+                                    params_changed_action();
+                                }
+                            }
+                        }
+                    });
 
                 // Phase slider (horizontal)
                 {
@@ -104,24 +164,18 @@ pub fn draw_nested_fourier_controls(
                 }
 
                 let pi = std::f64::consts::PI;
-                let phase_slider = egui::Slider::from_get_set(-pi..=pi, move |new_val| {
-                    if let Some(v) = new_val {
-                        setter.begin_set_parameter(phase_param);
-                        setter.set_parameter(phase_param, v as f32);
-                        setter.end_set_parameter(phase_param);
-                        v
-                    } else {
-                        phase_param.value() as f64
-                    }
-                })
-                .show_value(false);
-
-                let engine2 = engine.clone();
+                let mut ph_val = phase_param.value() as f64;
+                let phase_slider = egui::Slider::new(&mut ph_val, -pi..=pi).show_value(false);
                 let phase_resp = ui.add_sized([col_w - 4.0, phase_slider_h], phase_slider);
+                if phase_resp.changed() {
+                    setter.begin_set_parameter(phase_param);
+                    setter.set_parameter(phase_param, ph_val as f32);
+                    setter.end_set_parameter(phase_param);
+                }
 
                 ui.label(
                     RichText::new(format!(
-                        "A{:.2}\nφ{:.2}",
+                        "A{:.3}\nφ{:.2}",
                         amp_param.value(),
                         phase_param.value(),
                     ))
@@ -129,12 +183,8 @@ pub fn draw_nested_fourier_controls(
                     .color(Color32::from_gray(190)),
                 );
 
-                if amp_resp.drag_stopped() {
-                    engine.fill_nested_fourier_curve(harmonic_idx);
-                    params_changed_action();
-                }
-                if phase_resp.drag_stopped() {
-                    engine2.fill_nested_fourier_curve(harmonic_idx);
+                if amp_resp.drag_stopped() || phase_resp.drag_stopped() {
+                    engine.fill_nested_fourier_curve(harmonic_idx, chart_type);
                     params_changed_action();
                 }
             });

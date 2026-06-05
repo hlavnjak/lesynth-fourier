@@ -31,6 +31,8 @@ impl CurveType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Enum)]
 pub enum GranularityLevel {
+    #[name = "0.001"]
+    Micro,
     #[name = "0.025"]
     UltraLow,
     #[name = "0.05"]
@@ -44,7 +46,8 @@ pub enum GranularityLevel {
 }
 
 impl GranularityLevel {
-    pub const VARIANTS: [GranularityLevel; 5] = [
+    pub const VARIANTS: [GranularityLevel; 6] = [
+        GranularityLevel::Micro,
         GranularityLevel::UltraLow,
         GranularityLevel::VeryLow,
         GranularityLevel::Low,
@@ -54,6 +57,7 @@ impl GranularityLevel {
 
     pub fn as_f64(&self) -> f64 {
         match self {
+            GranularityLevel::Micro => 0.001,
             GranularityLevel::UltraLow => 0.025,
             GranularityLevel::VeryLow => 0.05,
             GranularityLevel::Low => 0.1,
@@ -112,16 +116,18 @@ mod tests {
 
     #[test]
     fn test_granularity_level_variants() {
-        assert_eq!(GranularityLevel::VARIANTS.len(), 5);
-        assert_eq!(GranularityLevel::VARIANTS[0], GranularityLevel::UltraLow);
-        assert_eq!(GranularityLevel::VARIANTS[1], GranularityLevel::VeryLow);
-        assert_eq!(GranularityLevel::VARIANTS[2], GranularityLevel::Low);
-        assert_eq!(GranularityLevel::VARIANTS[3], GranularityLevel::Medium);
-        assert_eq!(GranularityLevel::VARIANTS[4], GranularityLevel::High);
+        assert_eq!(GranularityLevel::VARIANTS.len(), 6);
+        assert_eq!(GranularityLevel::VARIANTS[0], GranularityLevel::Micro);
+        assert_eq!(GranularityLevel::VARIANTS[1], GranularityLevel::UltraLow);
+        assert_eq!(GranularityLevel::VARIANTS[2], GranularityLevel::VeryLow);
+        assert_eq!(GranularityLevel::VARIANTS[3], GranularityLevel::Low);
+        assert_eq!(GranularityLevel::VARIANTS[4], GranularityLevel::Medium);
+        assert_eq!(GranularityLevel::VARIANTS[5], GranularityLevel::High);
     }
 
     #[test]
     fn test_granularity_level_values() {
+        assert_eq!(GranularityLevel::Micro.as_f64(), 0.001);
         assert_eq!(GranularityLevel::UltraLow.as_f64(), 0.025);
         assert_eq!(GranularityLevel::VeryLow.as_f64(), 0.05);
         assert_eq!(GranularityLevel::Low.as_f64(), 0.1);
@@ -137,6 +143,6 @@ mod tests {
 
     #[test]
     fn test_granularity_level_default() {
-        assert_eq!(GranularityLevel::default(), GranularityLevel::High);
+        assert_eq!(GranularityLevel::default(), GranularityLevel::Low);
     }
 }
