@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use nih_plug::prelude::*;
-use super::{CurveType, GranularityLevel, NestedFourierAmps, NestedFourierPhases};
+use super::{CurveType, GranularityLevel, NestedFourierState};
 
 /// A single harmonic's complete parameter set.
 /// - amp:     amplitude multiplier
@@ -51,14 +51,10 @@ pub struct HarmonicParam {
     pub wobble_amp_phase: FloatParam,
     #[id = "wobble_freq_phase"]
     pub wobble_freq_phase: FloatParam,
-    // ── Amplitude-chart Nested Fourier series ─────────────────────────────────
-    #[nested(group = "nested_fourier")]
-    pub nested_fourier_amps: Arc<NestedFourierAmps>,
-    #[nested(group = "nested_fourier_phases")]
-    pub nested_fourier_phases: Arc<NestedFourierPhases>,
-    // ── Phase-chart Nested Fourier series (independent set) ───────────────────
-    #[nested(id_prefix = "pnf_amp", group = "nested_fourier_phasechart_amps")]
-    pub nested_fourier_amps_p: Arc<NestedFourierAmps>,
-    #[nested(id_prefix = "pnf_ph", group = "nested_fourier_phasechart_phases")]
-    pub nested_fourier_phases_p: Arc<NestedFourierPhases>,
+    // ── Nested Fourier sub-harmonic state (amplitude + phase charts) ──────────
+    // Persisted serde state rather than host-automatable params: ~4000 sliders
+    // across all harmonics would otherwise be exposed to the host. The derive
+    // suffixes the persist key per harmonic (e.g. "nested_fourier_1").
+    #[persist = "nested_fourier"]
+    pub nested_fourier: Arc<RwLock<NestedFourierState>>,
 }

@@ -323,7 +323,6 @@ impl Plugin for LeSynth {
                                                 ChartType::Amp,
                                                 harmonic,
                                                 synth_compute_engine.clone(),
-                                                setter,
                                                 &params_changed_action,
                                                 window_width - 12.0,
                                             );
@@ -371,7 +370,6 @@ impl Plugin for LeSynth {
                                                 ChartType::Phase,
                                                 harmonic,
                                                 synth_compute_engine.clone(),
-                                                setter,
                                                 &params_changed_action,
                                                 window_width - 12.0,
                                             );

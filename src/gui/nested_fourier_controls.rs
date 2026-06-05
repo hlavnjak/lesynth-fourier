@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use nih_plug::prelude::ParamSetter;
 use crate::engine::{ChartType, SynthComputeEngine};
 use crate::params::{GranularityLevel, HarmonicParam, NUM_NESTED_FOURIER_HARMONICS};
 
@@ -34,17 +33,14 @@ pub fn draw_nested_fourier_controls(
     chart_type: ChartType,
     harmonic: &HarmonicParam,
     synth_compute_engine: Arc<SynthComputeEngine>,
-    setter: &ParamSetter,
     params_changed_action: &dyn Fn(),
     window_width: f32,
 ) {
     use nih_plug_egui::egui::{self, Color32, RichText, Stroke};
 
-    // Each chart (amplitude / phase) drives its own independent Fourier series.
-    let (amps, phases) = match chart_type {
-        ChartType::Amp => (&harmonic.nested_fourier_amps, &harmonic.nested_fourier_phases),
-        ChartType::Phase => (&harmonic.nested_fourier_amps_p, &harmonic.nested_fourier_phases_p),
-    };
+    // Each chart (amplitude / phase) drives its own independent Fourier series,
+    // stored as persisted (non-automatable) serde state behind an RwLock.
+    let nf = &harmonic.nested_fourier;
 
     let amp_slider_h = 80.0;
     let phase_slider_h = 20.0;
@@ -56,9 +52,14 @@ pub fn draw_nested_fourier_controls(
         .show(ui, |ui| {
     ui.horizontal(|ui| {
         for sub_idx in 0..NUM_NESTED_FOURIER_HARMONICS {
-            let amp_param   = amps.get(sub_idx);
-            let phase_param = phases.get(sub_idx);
             let engine = synth_compute_engine.clone();
+
+            // Snapshot this sub-harmonic's current amp/phase for the frame.
+            let (cur_amp, cur_phase) = {
+                let state = nf.read().unwrap();
+                let series = state.series(chart_type);
+                (series.amps[sub_idx], series.phases[sub_idx])
+            };
 
             // Per-slider granularity caps the amplitude slider's range. This is
             // GUI-only state (kept in egui memory): it persists across frames but
@@ -100,15 +101,13 @@ pub fn draw_nested_fourier_controls(
                 // push changes to the parameter on change. This avoids the inverted /
                 // jumpy behaviour that `Slider::from_get_set` exhibits for vertical
                 // sliders.
-                let mut amp_val = amp_param.value() as f64;
+                let mut amp_val = cur_amp as f64;
                 let amp_slider = egui::Slider::new(&mut amp_val, 0.0..=gran_max)
                     .vertical()
                     .show_value(false);
                 let amp_resp = ui.add_sized([col_w - 4.0, amp_slider_h], amp_slider);
                 if amp_resp.changed() {
-                    setter.begin_set_parameter(amp_param);
-                    setter.set_parameter(amp_param, amp_val as f32);
-                    setter.end_set_parameter(amp_param);
+                    nf.write().unwrap().series_mut(chart_type).amps[sub_idx] = amp_val as f32;
                 }
 
                 // Per-slider granularity selector (sets this slider's amplitude max).
@@ -135,10 +134,17 @@ pub fn draw_nested_fourier_controls(
                                 ui.data_mut(|d| d.insert_temp(gran_id, variant));
                                 // Clamp the stored value down if it now exceeds the new max.
                                 let new_max = variant.as_f64() as f32;
-                                if amp_param.value() > new_max {
-                                    setter.begin_set_parameter(amp_param);
-                                    setter.set_parameter(amp_param, new_max);
-                                    setter.end_set_parameter(amp_param);
+                                let clamped = {
+                                    let mut state = nf.write().unwrap();
+                                    let amp = &mut state.series_mut(chart_type).amps[sub_idx];
+                                    if *amp > new_max {
+                                        *amp = new_max;
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                };
+                                if clamped {
                                     engine.fill_nested_fourier_curve(harmonic_idx, chart_type);
                                     params_changed_action();
                                 }
@@ -164,23 +170,17 @@ pub fn draw_nested_fourier_controls(
                 }
 
                 let pi = std::f64::consts::PI;
-                let mut ph_val = phase_param.value() as f64;
+                let mut ph_val = cur_phase as f64;
                 let phase_slider = egui::Slider::new(&mut ph_val, -pi..=pi).show_value(false);
                 let phase_resp = ui.add_sized([col_w - 4.0, phase_slider_h], phase_slider);
                 if phase_resp.changed() {
-                    setter.begin_set_parameter(phase_param);
-                    setter.set_parameter(phase_param, ph_val as f32);
-                    setter.end_set_parameter(phase_param);
+                    nf.write().unwrap().series_mut(chart_type).phases[sub_idx] = ph_val as f32;
                 }
 
                 ui.label(
-                    RichText::new(format!(
-                        "A{:.3}\nφ{:.2}",
-                        amp_param.value(),
-                        phase_param.value(),
-                    ))
-                    .size(9.0)
-                    .color(Color32::from_gray(190)),
+                    RichText::new(format!("A{:.3}\nφ{:.2}", amp_val, ph_val))
+                        .size(9.0)
+                        .color(Color32::from_gray(190)),
                 );
 
                 if amp_resp.drag_stopped() || phase_resp.drag_stopped() {

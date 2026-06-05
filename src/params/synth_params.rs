@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
 
 use crate::constants::*;
-use super::{CurveType, GranularityLevel, HarmonicParam, NestedFourierAmps, NestedFourierPhases};
+use super::{CurveType, GranularityLevel, HarmonicParam, NestedFourierState};
 
 #[derive(Params)]
 pub struct LeSynthParams {
@@ -132,10 +132,7 @@ impl Default for LeSynthParams {
                     default_wobble_freq,
                     wobble_freq_range,
                 ),
-                nested_fourier_amps: Arc::new(NestedFourierAmps::new(i)),
-                nested_fourier_phases: Arc::new(NestedFourierPhases::new(i)),
-                nested_fourier_amps_p: Arc::new(NestedFourierAmps::new(i)),
-                nested_fourier_phases_p: Arc::new(NestedFourierPhases::new(i)),
+                nested_fourier: Arc::new(RwLock::new(NestedFourierState::default())),
             }
         });
 

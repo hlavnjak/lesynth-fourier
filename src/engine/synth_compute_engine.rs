@@ -132,17 +132,14 @@ impl SynthComputeEngine {
     /// Each chart uses its own independent set of sub-harmonic parameters.
     pub fn fill_nested_fourier_curve(&self, n: usize, chart_type: ChartType) {
         let harmonic = &self.synth_params.harmonics[n];
-        let (sub_amps, sub_phases, offset) = match chart_type {
-            ChartType::Amp => (
-                harmonic.nested_fourier_amps.values(),
-                harmonic.nested_fourier_phases.values(),
-                harmonic.curve_offset_amp.value() as f64,
-            ),
-            ChartType::Phase => (
-                harmonic.nested_fourier_amps_p.values(),
-                harmonic.nested_fourier_phases_p.values(),
-                harmonic.curve_offset_phase.value() as f64,
-            ),
+        let offset = match chart_type {
+            ChartType::Amp => harmonic.curve_offset_amp.value() as f64,
+            ChartType::Phase => harmonic.curve_offset_phase.value() as f64,
+        };
+        let (sub_amps, sub_phases) = {
+            let state = harmonic.nested_fourier.read().unwrap();
+            let series = state.series(chart_type);
+            (series.amps, series.phases)
         };
 
         let mut data = match chart_type {
