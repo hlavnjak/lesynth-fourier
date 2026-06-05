@@ -21,8 +21,8 @@ use nih_plug_egui::{
 };
 
 use crate::constants::*;
-use crate::engine::{ChartType, SynthComputeEngine};
-use crate::gui::{draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_nested_fourier_controls, draw_piano_keyboard, draw_metallic_background};
+use crate::engine::{ChartType, ExecutionMode, SynthComputeEngine};
+use crate::gui::{draw_analysis_controls, draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_nested_fourier_controls, draw_piano_keyboard, draw_metallic_background};
 use crate::params::LeSynthParams;
 use crate::voice::Voice;
 
@@ -239,7 +239,47 @@ impl Plugin for LeSynth {
                 egui::CentralPanel::default().show(egui_ctx, |ui| {
                         // Draw metallic background
                         draw_metallic_background(ui, window_width, window_height);
-                        
+
+                        // ── Host-pushed analysis jobs ─────────────────────────────
+                        // If the host DAW pushed a subtrack to analyse, claim it,
+                        // run the analysis and flip into Analysis mode.
+                        if let Some(job) = crate::claim_analysis_job() {
+                            synth_compute_engine.analyze_and_load(
+                                &job.samples,
+                                job.sample_rate,
+                                job.base_freq,
+                                0,
+                            );
+                        }
+
+                        // ── Execution-mode switch ─────────────────────────────────
+                        let mut mode = synth_compute_engine.shared_params.execution_mode();
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_gray(45))
+                            .inner_margin(egui::Margin::same(4i8))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Mode:")
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    );
+                                    if ui
+                                        .selectable_label(mode == ExecutionMode::Synth, "Synth")
+                                        .clicked()
+                                    {
+                                        mode = ExecutionMode::Synth;
+                                    }
+                                    if ui
+                                        .selectable_label(mode == ExecutionMode::Analysis, "Analysis")
+                                        .clicked()
+                                    {
+                                        mode = ExecutionMode::Analysis;
+                                    }
+                                });
+                            });
+                        synth_compute_engine.shared_params.set_execution_mode(mode);
+
                         let params_changed_action = || {
                             synth_compute_engine.set_normalization_needed(true);
 
@@ -262,6 +302,7 @@ impl Plugin for LeSynth {
                         };
 
                         // Keep original structure but make it responsive
+                        if mode == ExecutionMode::Synth {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
                             .max_height(window_height * 0.48)
@@ -378,6 +419,19 @@ impl Plugin for LeSynth {
                                     ui.add_space(4.0);
                                 }
                             });
+                        } else {
+                            // Analysis mode: per-harmonic enable/disable grid.
+                            egui::Frame::new()
+                                .fill(egui::Color32::from_rgb(18, 25, 45))
+                                .inner_margin(egui::Margin::same(6i8))
+                                .show(ui, |ui| {
+                                    draw_analysis_controls(
+                                        ui,
+                                        &synth_compute_engine,
+                                        window_width - 12.0,
+                                    );
+                                });
+                        }
 
 
                         ui.add_space(8.0);

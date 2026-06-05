@@ -176,8 +176,15 @@ impl SynthComputeEngine {
             .collect();
         let sum: f32 = maximums.iter().copied().sum();
 
-        if ampl_data_normalized.len() != ampl_data.len() {
-            *ampl_data_normalized = vec![vec![0.0; ampl_data[0].len()]; ampl_data.len()];
+        // Reallocate if the grid shape changed — the bucket count (inner len)
+        // changes when an analysis result is loaded, not just the harmonic
+        // count (outer len).
+        let shape_changed = ampl_data_normalized.len() != ampl_data.len()
+            || ampl_data_normalized.first().map(|r| r.len())
+                != ampl_data.first().map(|r| r.len());
+        if shape_changed {
+            let inner = ampl_data.first().map(|r| r.len()).unwrap_or(0);
+            *ampl_data_normalized = vec![vec![0.0; inner]; ampl_data.len()];
         }
 
         for (a, row) in ampl_data.iter().enumerate() {
@@ -461,7 +468,16 @@ impl SynthComputeEngine {
     fn normalize_amplitude_data_static(shared_params: &Arc<SharedParams>) {
         let amplitude_data = shared_params.amplitude_data.lock().unwrap();
         let mut ampl_data_normalized = shared_params.amplitude_data_normalized.lock().unwrap();
-        
+
+        // Match the (possibly changed) grid shape before copying.
+        let shape_changed = ampl_data_normalized.len() != amplitude_data.len()
+            || ampl_data_normalized.first().map(|r| r.len())
+                != amplitude_data.first().map(|r| r.len());
+        if shape_changed {
+            let inner = amplitude_data.first().map(|r| r.len()).unwrap_or(0);
+            *ampl_data_normalized = vec![vec![0.0; inner]; amplitude_data.len()];
+        }
+
         for a in 0..amplitude_data.len() {
             for b in 0..amplitude_data[a].len() {
                 ampl_data_normalized[a][b] = amplitude_data[a][b];
@@ -519,6 +535,64 @@ impl SynthComputeEngine {
         drop(key_buffers);
         log::warn!("Fallback to synchronous computation for key {}", key);
         self.assemble_buffer_for_key(key)
+    }
+
+    /// Replace the amplitude/phase grid with the result of an audio analysis.
+    /// Used by the Analysis execution mode. The grid is resized to the
+    /// analysis bucket count; harmonics beyond the engine's `NUM_HARMONICS`
+    /// are dropped and missing ones are zero-filled.
+    pub fn load_analysis(&self, result: &super::AnalysisResult) {
+        let buckets = result.num_buckets().max(1);
+
+        {
+            let mut amp = self.shared_params.amplitude_data.lock().unwrap();
+            let mut phase = self.shared_params.phase_data.lock().unwrap();
+            let mut norm = self.shared_params.amplitude_data_normalized.lock().unwrap();
+            let n = amp.len();
+            for h in 0..n {
+                let src_amp = result.amplitude.get(h);
+                let src_phase = result.phase.get(h);
+                amp[h] = (0..buckets)
+                    .map(|b| src_amp.and_then(|r| r.get(b)).copied().unwrap_or(0.0))
+                    .collect();
+                phase[h] = (0..buckets)
+                    .map(|b| src_phase.and_then(|r| r.get(b)).copied().unwrap_or(0.0))
+                    .collect();
+            }
+            // Keep the normalized grid the same shape as the new data.
+            *norm = vec![vec![0.0; buckets]; n];
+        }
+
+        self.set_normalization_needed(true);
+        self.shared_params.mark_all_buffers_dirty();
+        self.update_assembled_chart_with_key24();
+        log::info!(
+            "Loaded analysis grid: {} harmonics x {} buckets",
+            result.num_harmonics(),
+            buckets
+        );
+    }
+
+    /// Analyse a subtrack and load the resulting grid, switching to Analysis
+    /// mode. `num_buckets == 0` lets the analyser pick one bucket per period.
+    pub fn analyze_and_load(
+        &self,
+        samples: &[f32],
+        sample_rate: f32,
+        base_freq: f32,
+        num_buckets: usize,
+    ) {
+        let result = super::analyze_subtrack(
+            samples,
+            sample_rate,
+            base_freq,
+            num_buckets,
+            NUM_HARMONICS,
+            crate::constants::NUM_OF_BUCKETS_MAX as usize,
+        );
+        self.shared_params
+            .set_execution_mode(super::ExecutionMode::Analysis);
+        self.load_analysis(&result);
     }
 }
 
@@ -602,6 +676,29 @@ mod tests {
         // Values should remain the same when sum <= 1.0
         assert_eq!(normalized[0][0], 0.5);
         assert_eq!(normalized[1][0], 0.3);
+    }
+
+    #[test]
+    fn test_analyze_and_load_changes_bucket_count_without_panic() {
+        // Regression: load_analysis used to leave amplitude_data_normalized at
+        // the old bucket count, so the next assemble indexed out of bounds.
+        let engine = create_test_engine();
+
+        let sr = 44_100.0;
+        let freq = 220.0;
+        let samples: Vec<f32> = (0..sr as usize)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sr).sin())
+            .collect();
+
+        // Auto bucket count (≈ number of periods) differs from the default 70.
+        engine.analyze_and_load(&samples, sr, freq, 0);
+
+        let buckets = engine.shared_params.amplitude_data.lock().unwrap()[0].len();
+        assert_ne!(buckets, NUM_OF_BUCKETS_DEFAULT, "test should exercise a resize");
+
+        // Must not panic and must produce audio.
+        let buf = engine.assemble_buffer_for_key(24);
+        assert!(!buf.is_empty());
     }
 
     #[test]

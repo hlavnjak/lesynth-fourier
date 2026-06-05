@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod analysis_controls;
 pub mod piano_keyboard;
 pub mod harmonic_plot;
 pub mod assembled_chart;
@@ -19,6 +20,7 @@ pub mod curve_controls;
 pub mod metallic_background;
 pub mod nested_fourier_controls;
 
+pub use analysis_controls::draw_analysis_controls;
 pub use piano_keyboard::draw_piano_keyboard;
 pub use harmonic_plot::draw_harmonic_plot;
 pub use assembled_chart::draw_assembled_chart;

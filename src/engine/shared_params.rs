@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use crate::constants::NUM_KEYS;
+use crate::engine::ExecutionMode;
 use crate::voice::Voice;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -44,6 +45,9 @@ pub struct SharedParams {
     
     // Chart view control
     pub should_reset_chart_view: Arc<AtomicBool>,
+
+    /// Synth (curve-driven) vs Analysis (audio-driven) execution mode.
+    pub execution_mode: Arc<AtomicU8>,
 }
 
 impl SharedParams {
@@ -69,7 +73,19 @@ impl SharedParams {
             
             // Chart view control
             should_reset_chart_view: Arc::new(AtomicBool::new(false)),
+
+            execution_mode: Arc::new(AtomicU8::new(ExecutionMode::Synth.as_u8())),
         }
+    }
+
+    /// Current execution mode.
+    pub fn execution_mode(&self) -> ExecutionMode {
+        ExecutionMode::from_u8(self.execution_mode.load(Ordering::Relaxed))
+    }
+
+    /// Switch execution mode.
+    pub fn set_execution_mode(&self, mode: ExecutionMode) {
+        self.execution_mode.store(mode.as_u8(), Ordering::Relaxed);
     }
 
     fn populate_piano_periods() -> Vec<u32> {

@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod analysis;
 pub mod shared_params;
 pub mod synth_compute_engine;
 pub mod chart_type;
 
+pub use analysis::{analyze_subtrack, AnalysisResult, ExecutionMode};
 pub use shared_params::SharedParams;
 pub use synth_compute_engine::SynthComputeEngine;
 pub use chart_type::ChartType;

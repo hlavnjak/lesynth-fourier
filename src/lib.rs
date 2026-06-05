@@ -21,6 +21,109 @@ mod voice;
 
 pub use plugin::LeSynth;
 
+// ───────────────────────────────────────────────────────────────────────────
+// Host-facing C ABI bridge (Analysis execution mode)
+//
+// The host DAW loads this same shared object (it is both the VST3 plugin and a
+// plain cdylib). These exported functions let the host feed recorded audio
+// "subtracks" to the plugin for Fourier analysis. Because the host's VST3
+// component instances live in *this* shared object's address space, a global
+// inbox here is shared with them: the host pushes a job, the running editor
+// claims it and runs the analysis on its own engine.
+// ───────────────────────────────────────────────────────────────────────────
+
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+/// A pending analysis request handed from the host to a plugin instance.
+pub struct AnalysisJob {
+    pub samples: Vec<f32>,
+    pub sample_rate: f32,
+    pub base_freq: f32,
+}
+
+static ANALYSIS_INBOX: Mutex<VecDeque<AnalysisJob>> = Mutex::new(VecDeque::new());
+
+/// Claim the oldest pending analysis job (called by a plugin editor).
+pub(crate) fn claim_analysis_job() -> Option<AnalysisJob> {
+    ANALYSIS_INBOX.lock().ok().and_then(|mut q| q.pop_front())
+}
+
+/// Push a subtrack to be analysed by the next available plugin instance.
+/// Returns the new queue depth (0 on invalid input).
+///
+/// # Safety
+/// `samples` must point to `len` valid `f32`s.
+#[no_mangle]
+pub unsafe extern "C" fn lesynth_fourier_push_analysis(
+    samples: *const f32,
+    len: usize,
+    sample_rate: f32,
+    base_freq: f32,
+) -> u64 {
+    if samples.is_null() || len == 0 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(samples, len);
+    let job = AnalysisJob {
+        samples: slice.to_vec(),
+        sample_rate,
+        base_freq,
+    };
+    match ANALYSIS_INBOX.lock() {
+        Ok(mut q) => {
+            q.push_back(job);
+            q.len() as u64
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Stateless harmonic analysis, for the host's own preview plotting.
+///
+/// Writes `num_harmonics * num_buckets` floats (row-major, `[h*num_buckets+b]`)
+/// into `out_amp` and `out_phase`. Returns the number of buckets written, or a
+/// negative value on bad arguments.
+///
+/// # Safety
+/// `samples` must point to `len` valid `f32`s; `out_amp`/`out_phase` must each
+/// have room for `num_harmonics * num_buckets` `f32`s.
+#[no_mangle]
+pub unsafe extern "C" fn lesynth_fourier_analyze(
+    samples: *const f32,
+    len: usize,
+    sample_rate: f32,
+    base_freq: f32,
+    num_buckets: usize,
+    num_harmonics: usize,
+    out_amp: *mut f32,
+    out_phase: *mut f32,
+) -> i64 {
+    if samples.is_null() || out_amp.is_null() || out_phase.is_null() || num_buckets == 0 {
+        return -1;
+    }
+    let slice = std::slice::from_raw_parts(samples, len);
+    let result = engine::analyze_subtrack(
+        slice,
+        sample_rate,
+        base_freq,
+        num_buckets,
+        num_harmonics,
+        num_buckets,
+    );
+    let nb = result.num_buckets();
+    let nh = result.num_harmonics();
+    let amp_out = std::slice::from_raw_parts_mut(out_amp, num_harmonics * num_buckets);
+    let phase_out = std::slice::from_raw_parts_mut(out_phase, num_harmonics * num_buckets);
+    for h in 0..num_harmonics.min(nh) {
+        for b in 0..num_buckets.min(nb) {
+            amp_out[h * num_buckets + b] = result.amplitude[h][b];
+            phase_out[h * num_buckets + b] = result.phase[h][b];
+        }
+    }
+    nb as i64
+}
+
 #[cfg(all(debug_assertions, feature = "debug-logging"))]
 use std::sync::Once;
 #[cfg(all(debug_assertions, feature = "debug-logging"))]
