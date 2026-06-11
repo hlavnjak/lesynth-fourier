@@ -17,7 +17,7 @@ pub mod shared_params;
 pub mod synth_compute_engine;
 pub mod chart_type;
 
-pub use analysis::{analyze_subtrack, AnalysisResult, ExecutionMode};
+pub use analysis::{analyze_subtrack, normalize_for_display, AnalysisResult, ExecutionMode};
 pub use shared_params::SharedParams;
 pub use synth_compute_engine::SynthComputeEngine;
 pub use chart_type::ChartType;

@@ -40,6 +40,10 @@ pub struct AnalysisJob {
     pub samples: Vec<f32>,
     pub sample_rate: f32,
     pub base_freq: f32,
+    /// Per-position fundamental (absolute Hz), uniformly resampled across the
+    /// subtrack. Empty → flat at `base_freq` (legacy). Drives period-synchronous
+    /// bucketing and the per-bucket DFT frequency.
+    pub contour: Vec<f32>,
 }
 
 static ANALYSIS_INBOX: Mutex<VecDeque<AnalysisJob>> = Mutex::new(VecDeque::new());
@@ -52,23 +56,35 @@ pub(crate) fn claim_analysis_job() -> Option<AnalysisJob> {
 /// Push a subtrack to be analysed by the next available plugin instance.
 /// Returns the new queue depth (0 on invalid input).
 ///
+/// `contour`/`contour_len` are the host's per-position fundamental (absolute Hz,
+/// uniformly resampled across the subtrack); pass `null`/`0` for flat (legacy).
+///
 /// # Safety
-/// `samples` must point to `len` valid `f32`s.
+/// `samples` must point to `len` valid `f32`s; `contour`, if non-null, to
+/// `contour_len` valid `f32`s.
 #[no_mangle]
 pub unsafe extern "C" fn lesynth_fourier_push_analysis(
     samples: *const f32,
     len: usize,
     sample_rate: f32,
     base_freq: f32,
+    contour: *const f32,
+    contour_len: usize,
 ) -> u64 {
     if samples.is_null() || len == 0 {
         return 0;
     }
     let slice = std::slice::from_raw_parts(samples, len);
+    let contour = if contour.is_null() || contour_len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(contour, contour_len).to_vec()
+    };
     let job = AnalysisJob {
         samples: slice.to_vec(),
         sample_rate,
         base_freq,
+        contour,
     };
     match ANALYSIS_INBOX.lock() {
         Ok(mut q) => {
@@ -85,15 +101,23 @@ pub unsafe extern "C" fn lesynth_fourier_push_analysis(
 /// into `out_amp` and `out_phase`. Returns the number of buckets written, or a
 /// negative value on bad arguments.
 ///
+/// `contour`/`contour_len` are the host's per-position fundamental (absolute Hz,
+/// uniformly resampled across the subtrack); pass `null`/`0` for flat (legacy).
+/// `num_buckets` is the fixed grid the caller allocated for (must be > 0 here,
+/// since the output buffers are sized to it).
+///
 /// # Safety
-/// `samples` must point to `len` valid `f32`s; `out_amp`/`out_phase` must each
-/// have room for `num_harmonics * num_buckets` `f32`s.
+/// `samples` must point to `len` valid `f32`s; `contour`, if non-null, to
+/// `contour_len` valid `f32`s; `out_amp`/`out_phase` must each have room for
+/// `num_harmonics * num_buckets` `f32`s.
 #[no_mangle]
 pub unsafe extern "C" fn lesynth_fourier_analyze(
     samples: *const f32,
     len: usize,
     sample_rate: f32,
     base_freq: f32,
+    contour: *const f32,
+    contour_len: usize,
     num_buckets: usize,
     num_harmonics: usize,
     out_amp: *mut f32,
@@ -103,14 +127,22 @@ pub unsafe extern "C" fn lesynth_fourier_analyze(
         return -1;
     }
     let slice = std::slice::from_raw_parts(samples, len);
-    let result = engine::analyze_subtrack(
+    let contour = if contour.is_null() || contour_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(contour, contour_len)
+    };
+    let mut result = engine::analyze_subtrack(
         slice,
         sample_rate,
         base_freq,
+        contour,
         num_buckets,
         num_harmonics,
         num_buckets,
     );
+    // Match what the plugin's charts show (see analyze_and_load).
+    engine::normalize_for_display(&mut result, 0.9);
     let nb = result.num_buckets();
     let nh = result.num_harmonics();
     let amp_out = std::slice::from_raw_parts_mut(out_amp, num_harmonics * num_buckets);

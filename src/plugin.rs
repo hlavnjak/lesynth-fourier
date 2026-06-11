@@ -248,6 +248,7 @@ impl Plugin for LeSynth {
                                 &job.samples,
                                 job.sample_rate,
                                 job.base_freq,
+                                &job.contour,
                                 0,
                             );
                         }

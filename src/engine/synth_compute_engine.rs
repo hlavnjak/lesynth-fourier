@@ -574,22 +574,29 @@ impl SynthComputeEngine {
     }
 
     /// Analyse a subtrack and load the resulting grid, switching to Analysis
-    /// mode. `num_buckets == 0` lets the analyser pick one bucket per period.
+    /// mode. `num_buckets == 0` lets the analyser pick period-synchronous
+    /// buckets. `contour` is the host's per-position fundamental (absolute Hz,
+    /// uniformly resampled across the subtrack); empty → flat at `base_freq`.
     pub fn analyze_and_load(
         &self,
         samples: &[f32],
         sample_rate: f32,
         base_freq: f32,
+        contour: &[f32],
         num_buckets: usize,
     ) {
-        let result = super::analyze_subtrack(
+        let mut result = super::analyze_subtrack(
             samples,
             sample_rate,
             base_freq,
+            contour,
             num_buckets,
             NUM_HARMONICS,
             crate::constants::NUM_OF_BUCKETS_MAX as usize,
         );
+        // Scale the (often very quiet) analysed grid up so the charts are
+        // legible; resynthesis re-normalises separately.
+        super::normalize_for_display(&mut result, 0.9);
         self.shared_params
             .set_execution_mode(super::ExecutionMode::Analysis);
         self.load_analysis(&result);
@@ -691,7 +698,7 @@ mod tests {
             .collect();
 
         // Auto bucket count (≈ number of periods) differs from the default 70.
-        engine.analyze_and_load(&samples, sr, freq, 0);
+        engine.analyze_and_load(&samples, sr, freq, &[], 0);
 
         let buckets = engine.shared_params.amplitude_data.lock().unwrap()[0].len();
         assert_ne!(buckets, NUM_OF_BUCKETS_DEFAULT, "test should exercise a resize");

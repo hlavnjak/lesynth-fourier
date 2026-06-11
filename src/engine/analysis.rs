@@ -22,10 +22,14 @@
 //! resulting `amplitude[harmonic][bucket]` / `phase[harmonic][bucket]` grids
 //! plug straight into the existing charts and the existing resynthesis path.
 //!
-//! Picking the bucket length per-bucket from the *local* refined period (not a
-//! single global period) is what keeps the per-harmonic amp/phase curves
-//! continuous from bucket to bucket — exactly the "most continuous functions"
-//! the feature asks for.
+//! Bucket boundaries and the per-bucket DFT frequency follow a pitch *contour*
+//! supplied by the host (the per-frame fundamental track of the subtrack),
+//! rather than a single global period. In period-synchronous mode
+//! (`num_buckets == 0`) the boundaries are walked one local period at a time, so
+//! the grid tracks vibrato/drift and the per-harmonic amp/phase curves stay
+//! continuous from bucket to bucket — the "most continuous functions" the
+//! feature asks for. With an empty contour it falls back to a single global
+//! `base_freq` (legacy behaviour).
 
 use std::f32::consts::PI;
 
@@ -68,8 +72,14 @@ pub struct AnalysisResult {
     pub amplitude: Vec<Vec<f32>>,
     /// `phase[harmonic][bucket]`, in radians in [0, 2π).
     pub phase: Vec<Vec<f32>>,
-    /// The local period (in samples) used for each bucket.
+    /// The local period (in samples) actually used for each bucket. With a pitch
+    /// contour this follows vibrato/drift; flat otherwise.
     pub bucket_periods: Vec<f32>,
+    /// Per-bucket fundamental relative to `base_freq` (`f_local / base_freq`,
+    /// ≈1.0 ± a few %). This is the vibrato contour that survives to playback,
+    /// where it transposes onto whatever key is pressed. All-ones when analysed
+    /// without a contour.
+    pub pitch_ratio: Vec<f32>,
 }
 
 impl AnalysisResult {
@@ -82,124 +92,228 @@ impl AnalysisResult {
     }
 }
 
-/// Refine an approximate period around `center` using a short normalised
-/// autocorrelation search. This lets each bucket track small pitch drift so
-/// adjacent buckets line up phase-wise and the charts stay smooth.
-fn refine_period(samples: &[f32], start: usize, win: usize, approx: f32) -> f32 {
-    if approx < 2.0 {
-        return approx.max(2.0);
+/// Scale an analysis grid so its strongest harmonic reaches `target`, making
+/// the curves clearly visible on the 0..1 charts regardless of how quiet the
+/// source recording is. Relative harmonic balance (and all phases) are
+/// preserved. Grids with no real content (max below `MIN_CONTENT`) are left
+/// untouched so pure noise/DC isn't amplified into a fake signal.
+pub fn normalize_for_display(result: &mut AnalysisResult, target: f32) {
+    const MIN_CONTENT: f32 = 0.01;
+    let mut max = 0.0f32;
+    for row in &result.amplitude {
+        for &v in row {
+            if v > max {
+                max = v;
+            }
+        }
     }
-    let lo = (approx * 0.85).floor().max(2.0) as usize;
-    let hi = (approx * 1.15).ceil() as usize;
-    let end = (start + win).min(samples.len());
-    if end <= start + hi + 2 {
-        return approx;
+    if max < MIN_CONTENT {
+        return;
+    }
+    let gain = target / max;
+    for row in &mut result.amplitude {
+        for v in row.iter_mut() {
+            *v = (*v * gain).min(1.0);
+        }
+    }
+}
+
+/// Amplitudes below this are treated as silence: the harmonic is zeroed and its
+/// phase left at 0 (phase of near-silence is meaningless noise).
+const AMP_FLOOR: f32 = 0.004;
+
+/// Local periods spanned per bucket in period-synchronous mode (`num_buckets ==
+/// 0`). The bucket count then falls out as `subtrack_periods / this`, so the
+/// grid tracks the source length instead of being a fixed number.
+const PERIODS_PER_BUCKET: f32 = 4.0;
+/// Analysis window width, in local periods. A little wider than the bucket hop
+/// so adjacent buckets overlap → smoother amp/phase curves across buckets.
+const WINDOW_PERIODS: f32 = 6.0;
+
+/// One bucket's placement: window centre (source samples), window length, and
+/// the local fundamental to run the DFT at.
+struct BucketSpec {
+    center: f32,
+    win_len: usize,
+    local_freq: f32,
+}
+
+/// Local fundamental (Hz) at source position `pos` in `[0, len)`, read from a
+/// uniformly-resampled `contour` of absolute Hz with linear interpolation. An
+/// empty contour means "flat" → `base_freq` everywhere (legacy behaviour).
+fn local_freq_at(contour: &[f32], base_freq: f32, pos: f32, len: f32) -> f32 {
+    match contour.len() {
+        0 => base_freq,
+        1 => contour[0],
+        n => {
+            let x = (pos / len.max(1.0) * n as f32).clamp(0.0, (n - 1) as f32);
+            let i = x.floor() as usize;
+            if i >= n - 1 {
+                contour[n - 1]
+            } else {
+                contour[i] + (contour[i + 1] - contour[i]) * (x - i as f32)
+            }
+        }
+    }
+}
+
+/// Lay out the buckets for a subtrack.
+///
+/// * `num_buckets > 0` – fixed count, centres spread uniformly in time (the
+///   preview/host path that pre-allocated `num_buckets`); each window is still
+///   sized to the *local* period so vibrato keeps the DFT coherent.
+/// * `num_buckets == 0` – period-synchronous: walk the subtrack one local period
+///   at a time, grouping [`PERIODS_PER_BUCKET`] periods per bucket. The count is
+///   derived (and coarsened if it would exceed `max_buckets`).
+fn build_bucket_specs(
+    len: usize,
+    sample_rate: f32,
+    base_freq: f32,
+    contour: &[f32],
+    num_buckets: usize,
+    max_buckets: usize,
+) -> Vec<BucketSpec> {
+    let lenf = len as f32;
+    let win_for = |local_freq: f32| -> usize {
+        let p = (sample_rate / local_freq.max(1.0)).max(2.0);
+        ((p * WINDOW_PERIODS).round() as usize).clamp(2, len.max(2))
+    };
+
+    if num_buckets > 0 {
+        let buckets = num_buckets.clamp(1, max_buckets.max(1));
+        let hop = (lenf / buckets as f32).max(1.0);
+        return (0..buckets)
+            .map(|b| {
+                let center = (b as f32 + 0.5) * hop;
+                let local_freq = local_freq_at(contour, base_freq, center, lenf);
+                BucketSpec { center, win_len: win_for(local_freq), local_freq }
+            })
+            .collect();
     }
 
-    let mut best_lag = approx.round() as usize;
-    let mut best_score = f32::NEG_INFINITY;
-    for lag in lo..=hi {
-        let mut num = 0.0f32;
-        let mut den = 0.0f32;
-        let mut n = 0usize;
-        let mut i = start;
-        while i + lag < end {
-            num += samples[i] * samples[i + lag];
-            den += samples[i + lag] * samples[i + lag];
-            n += 1;
-            i += 1;
-        }
-        if n == 0 || den <= 1e-9 {
-            continue;
-        }
-        let score = num / den.sqrt();
-        if score > best_score {
-            best_score = score;
-            best_lag = lag;
-        }
+    // Period-synchronous. Coarsen the periods-per-bucket if the natural count
+    // would blow past the engine grid limit, so the whole subtrack is covered.
+    let base_period = (sample_rate / base_freq).max(2.0);
+    let natural = (lenf / (base_period * PERIODS_PER_BUCKET)).floor().max(1.0);
+    let periods_per_bucket = if natural as usize > max_buckets.max(1) {
+        lenf / (base_period * max_buckets.max(1) as f32)
+    } else {
+        PERIODS_PER_BUCKET
     }
-    best_lag as f32
+    .max(0.5);
+
+    let mut specs = Vec::new();
+    let mut pos = 0.0f32;
+    while pos < lenf && specs.len() < max_buckets.max(1) {
+        let local_freq = local_freq_at(contour, base_freq, pos, lenf);
+        let span = (sample_rate / local_freq.max(1.0) * periods_per_bucket).max(1.0);
+        let center = pos + span * 0.5;
+        specs.push(BucketSpec { center, win_len: win_for(local_freq), local_freq });
+        pos += span;
+    }
+    if specs.is_empty() {
+        let local_freq = local_freq_at(contour, base_freq, lenf * 0.5, lenf);
+        specs.push(BucketSpec { center: lenf * 0.5, win_len: win_for(local_freq), local_freq });
+    }
+    specs
 }
 
 /// Analyse one subtrack into an amplitude/phase grid.
 ///
+/// Buckets are laid out by [`build_bucket_specs`] — period-synchronously when
+/// `num_buckets == 0`. For each bucket we take a Hann-windowed slice centred on
+/// it and run a single-bin DFT at each harmonic's *local* absolute frequency
+/// `(h+1) * f_local`, where `f_local` follows the pitch `contour`. Tracking the
+/// local fundamental (rather than a single global one) keeps the DFT coherent
+/// through vibrato/drift instead of smearing it into amplitude loss; referencing
+/// the phase to an absolute sample index keeps it continuous across buckets.
+///
 /// * `samples`      – mono PCM of the subtrack.
 /// * `sample_rate`  – Hz.
-/// * `base_freq`    – estimated fundamental of the subtrack (Hz).
-/// * `num_buckets`  – requested bucket count; `0` means "auto" (one bucket per
-///                    fundamental period). Clamped to `max_buckets`.
+/// * `base_freq`    – median fundamental of the subtrack (Hz); transpose ref.
+/// * `contour`      – per-position fundamental (absolute Hz), uniformly resampled
+///                    across the subtrack; empty → flat at `base_freq` (legacy).
+/// * `num_buckets`  – fixed count, or `0` for period-synchronous auto.
 /// * `num_harmonics`– number of harmonics to extract per bucket.
 /// * `max_buckets`  – upper clamp matching the engine grid limits.
 pub fn analyze_subtrack(
     samples: &[f32],
     sample_rate: f32,
     base_freq: f32,
+    contour: &[f32],
     num_buckets: usize,
     num_harmonics: usize,
     max_buckets: usize,
 ) -> AnalysisResult {
     let num_harmonics = num_harmonics.max(1);
     let base_freq = base_freq.max(1.0);
-    let base_period = (sample_rate / base_freq).max(2.0);
+    let nyquist = sample_rate * 0.5;
 
-    // Decide how many buckets we span. Auto: one fundamental period each.
-    let auto = ((samples.len() as f32 / base_period).floor() as usize).max(1);
-    let buckets = if num_buckets == 0 { auto } else { num_buckets };
-    let buckets = buckets.clamp(1, max_buckets.max(1));
+    let len = samples.len();
+    let specs = build_bucket_specs(len, sample_rate, base_freq, contour, num_buckets, max_buckets);
+    let buckets = specs.len();
 
     let mut amplitude = vec![vec![0.0f32; buckets]; num_harmonics];
     let mut phase = vec![vec![0.0f32; buckets]; num_harmonics];
-    let mut bucket_periods = vec![base_period; buckets];
+    let bucket_periods: Vec<f32> =
+        specs.iter().map(|s| sample_rate / s.local_freq.max(1.0)).collect();
+    let pitch_ratio: Vec<f32> = specs.iter().map(|s| s.local_freq / base_freq).collect();
 
-    if samples.is_empty() {
-        return AnalysisResult { amplitude, phase, bucket_periods };
+    if len < 2 {
+        return AnalysisResult { amplitude, phase, bucket_periods, pitch_ratio };
     }
 
-    let bucket_len = (samples.len() as f32 / buckets as f32).max(2.0);
+    // Hann windows are cached per length: in period-synchronous mode every
+    // bucket of a steady note shares one length, so this is usually a single
+    // entry, but it stays correct when the local period changes.
+    let mut hann_cache: std::collections::HashMap<usize, (Vec<f32>, f32)> =
+        std::collections::HashMap::new();
 
-    for b in 0..buckets {
-        let start = (b as f32 * bucket_len).floor() as usize;
-        let win = bucket_len.ceil() as usize;
-        let start = start.min(samples.len().saturating_sub(1));
-        let end = (start + win).min(samples.len());
-        let span = end.saturating_sub(start);
-        if span < 2 {
-            continue;
-        }
+    for (b, spec) in specs.iter().enumerate() {
+        let win_len = spec.win_len.min(len);
+        let (hann, wsum) = hann_cache.entry(win_len).or_insert_with(|| {
+            let h: Vec<f32> = (0..win_len)
+                .map(|i| {
+                    let x = 2.0 * PI * i as f32 / win_len as f32;
+                    0.5 - 0.5 * x.cos()
+                })
+                .collect();
+            let s = h.iter().sum::<f32>().max(1e-6);
+            (h, s)
+        });
 
-        // Track the local period for continuity, then analyse one period worth
-        // of signal (or the whole bucket if it is shorter than a period).
-        let local_period = refine_period(samples, start, win, base_period);
-        bucket_periods[b] = local_period;
-        let analysis_len = (local_period.round() as usize).clamp(2, span);
+        let start = (spec.center - win_len as f32 * 0.5)
+            .max(0.0)
+            .min((len - win_len) as f32) as usize;
 
-        // Per-harmonic DFT at integer multiples of the local fundamental.
-        let p = analysis_len as f32;
         for h in 0..num_harmonics {
-            let k = (h + 1) as f32;
-            // Don't analyse harmonics above Nyquist.
-            if k * base_freq >= sample_rate * 0.5 {
+            let f = (h + 1) as f32 * spec.local_freq;
+            if f >= nyquist {
                 continue;
             }
+            let w = 2.0 * PI * f / sample_rate;
             let mut re = 0.0f32;
             let mut im = 0.0f32;
-            for n in 0..analysis_len {
-                let s = samples[start + n];
-                let theta = 2.0 * PI * k * (n as f32) / p;
+            for i in 0..win_len {
+                let s = hann[i] * samples[start + i];
+                let theta = w * (start + i) as f32;
                 re += s * theta.cos();
                 im -= s * theta.sin();
             }
-            let amp = 2.0 / p * (re * re + im * im).sqrt();
+            let amp = 2.0 / *wsum * (re * re + im * im).sqrt();
+            if amp < AMP_FLOOR {
+                continue; // leave amplitude/phase at 0 → no phase noise
+            }
+            amplitude[h][b] = amp.min(1.0);
             let mut ph = im.atan2(re);
             if ph < 0.0 {
                 ph += 2.0 * PI;
             }
-            amplitude[h][b] = amp.clamp(0.0, 1.0);
             phase[h][b] = ph;
         }
     }
 
-    AnalysisResult { amplitude, phase, bucket_periods }
+    AnalysisResult { amplitude, phase, bucket_periods, pitch_ratio }
 }
 
 #[cfg(test)]
@@ -222,7 +336,7 @@ mod tests {
             .map(|i| (2.0 * PI * freq * i as f32 / sr).sin())
             .collect();
 
-        let res = analyze_subtrack(&samples, sr, freq, 0, 16, 2000);
+        let res = analyze_subtrack(&samples, sr, freq, &[], 0, 16, 2000);
         assert_eq!(res.num_harmonics(), 16);
         assert!(res.num_buckets() > 0);
 
@@ -235,9 +349,75 @@ mod tests {
     }
 
     #[test]
+    fn harmonic_rich_signal_recovers_amplitudes() {
+        // Sum of three harmonics with known amplitudes — like a bowed string.
+        let sr = 44_100.0;
+        let f = 196.0; // ~G3, a typical violin note
+        let n = (sr as usize) / 2;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr;
+                0.5 * (2.0 * PI * f * t).sin()
+                    + 0.25 * (2.0 * PI * 2.0 * f * t).sin()
+                    + 0.125 * (2.0 * PI * 3.0 * f * t).sin()
+            })
+            .collect();
+
+        let res = analyze_subtrack(&samples, sr, f, &[], 0, 16, 2000);
+        let mid = res.num_buckets() / 2;
+        let (a1, a2, a3) = (res.amplitude[0][mid], res.amplitude[1][mid], res.amplitude[2][mid]);
+
+        // Amplitudes must be recovered near their true values (not ~0).
+        assert!((a1 - 0.5).abs() < 0.08, "H1 amp {} (want ~0.5)", a1);
+        assert!((a2 - 0.25).abs() < 0.06, "H2 amp {} (want ~0.25)", a2);
+        assert!((a3 - 0.125).abs() < 0.05, "H3 amp {} (want ~0.125)", a3);
+        // Harmonics above the 3rd are silent → phase left at 0 (no noise).
+        assert!(res.amplitude[5][mid] < 0.02);
+        assert_eq!(res.phase[5][mid], 0.0);
+    }
+
+    #[test]
+    fn contour_tracks_vibrato_into_pitch_ratio() {
+        // A 5 Hz, ±3% vibrato around 220 Hz. f0(t) = 220·(1 + 0.03·sin(2π·5t)).
+        let sr = 44_100.0;
+        let base = 220.0f32;
+        let depth = 0.03f32;
+        let rate = 5.0f32;
+        let n = sr as usize; // 1 s
+        // Build the signal from the integrated instantaneous phase.
+        let mut phase = 0.0f32;
+        let mut samples = Vec::with_capacity(n);
+        let mut contour = Vec::with_capacity(n / 256);
+        for i in 0..n {
+            let t = i as f32 / sr;
+            let f = base * (1.0 + depth * (2.0 * PI * rate * t).sin());
+            phase += 2.0 * PI * f / sr;
+            samples.push(phase.sin());
+            if i % 256 == 0 {
+                contour.push(f); // uniformly-resampled contour, ~one per 256 samples
+            }
+        }
+
+        // Period-synchronous, with the true contour.
+        let res = analyze_subtrack(&samples, sr, base, &contour, 0, 8, 2000);
+        assert!(res.num_buckets() > 10);
+        // pitch_ratio should swing roughly ±depth and stay centred near 1.
+        let max = res.pitch_ratio.iter().cloned().fold(f32::MIN, f32::max);
+        let min = res.pitch_ratio.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(max > 1.0 + depth * 0.5, "ratio peak too low: {}", max);
+        assert!(min < 1.0 - depth * 0.5, "ratio trough too high: {}", min);
+        // With the contour tracked, H1 amplitude stays strong throughout (no
+        // vibrato→amplitude leakage that a fixed-frequency DFT would suffer).
+        let h1_min = res.amplitude[0].iter().cloned().fold(f32::MAX, f32::min);
+        assert!(h1_min > 0.4, "H1 collapsed somewhere: {}", h1_min);
+    }
+
+    #[test]
     fn empty_input_is_safe() {
-        let res = analyze_subtrack(&[], 44100.0, 440.0, 0, 8, 2000);
+        let res = analyze_subtrack(&[], 44100.0, 440.0, &[], 0, 8, 2000);
         assert_eq!(res.num_harmonics(), 8);
-        assert_eq!(res.num_buckets(), 1);
+        assert!(res.num_buckets() >= 1);
+        // No samples → all silent.
+        assert!(res.amplitude.iter().all(|row| row.iter().all(|&a| a == 0.0)));
     }
 }
