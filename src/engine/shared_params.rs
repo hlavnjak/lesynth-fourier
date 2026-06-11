@@ -30,6 +30,11 @@ pub struct SharedParams {
     pub amplitude_data: Arc<Mutex<Vec<Vec<f32>>>>,
     pub amplitude_data_normalized: Arc<Mutex<Vec<Vec<f32>>>>,
     pub phase_data: Arc<Mutex<Vec<Vec<f32>>>>,
+    /// Per-bucket playback pitch ratio (`f_local / base_freq`) from audio
+    /// analysis; one entry per bucket. `1.0` everywhere means flat (synth mode /
+    /// no vibrato). Applied only in Analysis execution mode, where it transposes
+    /// each bucket's rendered period so vibrato/drift becomes audible.
+    pub bucket_pitch_ratio: Arc<Mutex<Vec<f32>>>,
     pub voices: Arc<Mutex<Vec<Option<Voice>>>>,
     pub assembled_sound_plotted: Arc<Mutex<Vec<f32>>>,
     pub piano_periods: Arc<Mutex<Vec<u32>>>,
@@ -58,6 +63,7 @@ impl SharedParams {
             amplitude_data: Arc::new(Mutex::new(vec![vec![0.0; buckets]; num_harmonics])),
             amplitude_data_normalized: Arc::new(Mutex::new(vec![vec![0.0; buckets]; num_harmonics])),
             phase_data: Arc::new(Mutex::new(vec![vec![0.0; buckets]; num_harmonics])),
+            bucket_pitch_ratio: Arc::new(Mutex::new(vec![1.0; buckets])),
             voices: Arc::new(Mutex::new(vec![None; NUM_KEYS])),
             assembled_sound_plotted: Arc::new(Mutex::new(Vec::new())),
             piano_periods: Arc::new(Mutex::new(Self::populate_piano_periods())),

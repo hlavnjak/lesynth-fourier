@@ -18,8 +18,26 @@ use std::thread;
 use std::time::Duration;
 use crate::constants::{NUM_HARMONICS, NUM_OF_BUCKETS_DEFAULT, TWO_PI, NUM_KEYS, max_harmonic_for_key};
 use crate::params::LeSynthParams;
-use super::{ChartType, SharedParams};
+use super::{ChartType, ExecutionMode, SharedParams};
 use super::shared_params::BufferState;
+
+/// Snapshot the per-bucket pitch ratios for playback — but only in Analysis
+/// mode. In Synth mode playback is always flat, so this returns empty and every
+/// bucket renders at the key's base period (no behaviour change for synth).
+fn bucket_pitch_ratios(shared_params: &SharedParams) -> Vec<f32> {
+    if shared_params.execution_mode() == ExecutionMode::Analysis {
+        shared_params.bucket_pitch_ratio.lock().unwrap().clone()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Rendered period length (samples) for `bucket`: the key's base period scaled
+/// by the bucket's pitch ratio (clamped ≥ 2). A missing/empty ratio means flat.
+fn bucket_period(base_period: usize, ratios: &[f32], bucket: usize) -> usize {
+    let r = ratios.get(bucket).copied().unwrap_or(1.0);
+    ((base_period as f32 / r.max(1e-3)).round() as usize).max(2)
+}
 
 #[derive(Clone)]
 pub struct SynthComputeEngine {
@@ -206,18 +224,25 @@ impl SynthComputeEngine {
         let ampl_data_normalized = self.shared_params.amplitude_data_normalized.lock().unwrap();
         let phase_data = self.shared_params.phase_data.lock().unwrap();
         let piano_periods = self.shared_params.piano_periods.lock().unwrap();
-        let period = piano_periods[key] as usize;
+        let base_period = piano_periods[key] as usize;
+        // Per-bucket vibrato ratios apply only in Analysis mode; flat otherwise.
+        let pitch_ratio = bucket_pitch_ratios(&self.shared_params);
 
         // Calculate maximum usable harmonic for this key to prevent aliasing
         let max_harmonic = max_harmonic_for_key(key);
 
         let mut sound = Vec::new();
         for bucket in 0..ampl_data_normalized[0].len() {
+            // Transpose this bucket's period by the local pitch ratio. Each
+            // bucket still renders exactly one fundamental cycle, so harmonics
+            // complete integer cycles and bucket boundaries stay phase-aligned.
+            let period = bucket_period(base_period, &pitch_ratio, bucket);
+            let max_h = num_harmonics.min(max_harmonic).min(period / 2);
             for t in 0..period {
                 let mut sample = 0.0;
                 let harmonic_ampl_enabled = self.shared_params.harmonic_ampl_enabled.lock().unwrap();
                 let harmonic_phase_enabled = self.shared_params.harmonic_phase_enabled.lock().unwrap();
-                for n in 0..num_harmonics.min(max_harmonic) {
+                for n in 0..max_h {
                     let amp = ampl_data_normalized[n][bucket];
                     if !harmonic_ampl_enabled[n] || amp == 0.0 {
                         continue;
@@ -233,10 +258,10 @@ impl SynthComputeEngine {
                 sound.push(sample.clamp(-1.0, 1.0));
             }
         }
-        
+
         let elapsed = start_time.elapsed();
-        log::trace!("assemble_buffer_for_key(key={}) took: {:?} (period={}, total_samples={}, max_harmonic={}/{})",
-                 key, elapsed, piano_periods[key], sound.len(), max_harmonic, num_harmonics);
+        log::trace!("assemble_buffer_for_key(key={}) took: {:?} (base_period={}, total_samples={}, max_harmonic={}/{})",
+                 key, elapsed, base_period, sound.len(), max_harmonic, num_harmonics);
         
         sound
     }
@@ -406,25 +431,27 @@ impl SynthComputeEngine {
         let max_harmonic = max_harmonic_for_key(key);
 
         // Copy all required data once and release locks immediately to avoid blocking GUI
-        let (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, period) = {
+        let (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, base_period, pitch_ratio) = {
             let ampl_data_normalized = shared_params.amplitude_data_normalized.lock().unwrap();
             let phase_data = shared_params.phase_data.lock().unwrap();
             let piano_periods = shared_params.piano_periods.lock().unwrap();
             let harmonic_ampl_enabled = shared_params.harmonic_ampl_enabled.lock().unwrap();
             let harmonic_phase_enabled = shared_params.harmonic_phase_enabled.lock().unwrap();
-            
+
             let num_harmonics = ampl_data_normalized.len();
-            let period = piano_periods[key] as usize;
-            
+            let base_period = piano_periods[key] as usize;
+
             // Deep copy the data we need
             let ampl_data_copy: Vec<Vec<f32>> = ampl_data_normalized.clone();
             let phase_data_copy: Vec<Vec<f32>> = phase_data.clone();
             let harmonic_ampl_enabled_copy: Vec<bool> = harmonic_ampl_enabled.clone();
             let harmonic_phase_enabled_copy: Vec<bool> = harmonic_phase_enabled.clone();
-            
-            (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, period)
+            // Per-bucket vibrato ratios (Analysis mode only; empty → flat).
+            let pitch_ratio = bucket_pitch_ratios(shared_params);
+
+            (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, base_period, pitch_ratio)
         }; // All locks are released here
-        
+
         let mut sound = Vec::new();
         for bucket in 0..ampl_data_copy[0].len() {
             // Check for cancellation periodically
@@ -432,15 +459,20 @@ impl SynthComputeEngine {
                 log::debug!("Computation cancelled for key {} during bucket {}", key, bucket);
                 return Vec::new(); // Return empty buffer on cancellation
             }
-            
+
             // Yield to other threads every few buckets to keep GUI responsive
             if bucket % 10 == 0 && bucket > 0 {
                 thread::sleep(Duration::from_millis(1));
             }
-            
+
+            // Transpose this bucket's period by the local pitch ratio. Each
+            // bucket still renders exactly one fundamental cycle, so harmonics
+            // complete integer cycles and bucket boundaries stay phase-aligned.
+            let period = bucket_period(base_period, &pitch_ratio, bucket);
+            let max_h = num_harmonics.min(max_harmonic).min(period / 2);
             for t in 0..period {
                 let mut sample = 0.0;
-                for n in 0..num_harmonics.min(max_harmonic) {
+                for n in 0..max_h {
                     let amp = ampl_data_copy[n][bucket];
                     if !harmonic_ampl_enabled_copy[n] || amp == 0.0 {
                         continue;
@@ -458,8 +490,8 @@ impl SynthComputeEngine {
         }
         
         let elapsed = start_time.elapsed();
-        log::trace!("async compute_buffer_for_key(key={}) took: {:?} (period={}, total_samples={}, max_harmonic={}/{})",
-                 key, elapsed, period, sound.len(), max_harmonic, num_harmonics);
+        log::trace!("async compute_buffer_for_key(key={}) took: {:?} (base_period={}, total_samples={}, max_harmonic={}/{})",
+                 key, elapsed, base_period, sound.len(), max_harmonic, num_harmonics);
         
         sound
     }
@@ -561,6 +593,15 @@ impl SynthComputeEngine {
             }
             // Keep the normalized grid the same shape as the new data.
             *norm = vec![vec![0.0; buckets]; n];
+        }
+
+        {
+            // Per-bucket pitch ratio drives the playback vibrato. Missing/short
+            // → 1.0 (flat) so playback degrades gracefully.
+            let mut ratio = self.shared_params.bucket_pitch_ratio.lock().unwrap();
+            *ratio = (0..buckets)
+                .map(|b| result.pitch_ratio.get(b).copied().unwrap_or(1.0))
+                .collect();
         }
 
         self.set_normalization_needed(true);
@@ -725,5 +766,42 @@ mod tests {
         let normalized = engine.shared_params.amplitude_data_normalized.lock().unwrap();
         assert_eq!(normalized[0][0], 0.5); // 1.0 / 2.0
         assert_eq!(normalized[1][0], 0.5); // 1.0 / 2.0
+    }
+
+    #[test]
+    fn bucket_period_scales_with_ratio() {
+        assert_eq!(bucket_period(100, &[1.0], 0), 100); // flat
+        assert_eq!(bucket_period(100, &[2.0], 0), 50); // sharper → shorter
+        assert_eq!(bucket_period(100, &[0.5], 0), 200); // flatter → longer
+        assert_eq!(bucket_period(100, &[], 5), 100); // missing → flat
+        assert!(bucket_period(2, &[1000.0], 0) >= 2); // clamped ≥ 2
+    }
+
+    #[test]
+    fn analysis_pitch_ratio_transposes_playback_period() {
+        let engine = create_test_engine();
+        let key = 40;
+        let buckets = engine.shared_params.amplitude_data.lock().unwrap()[0].len();
+        let base_period = engine.shared_params.piano_periods.lock().unwrap()[key] as usize;
+        *engine.shared_params.normalization_needed.lock().unwrap() = false;
+
+        // A ratio grid is present, but Synth mode must ignore it (flat playback).
+        {
+            let mut r = engine.shared_params.bucket_pitch_ratio.lock().unwrap();
+            *r = vec![2.0; buckets];
+        }
+        engine.shared_params.set_execution_mode(ExecutionMode::Synth);
+        let synth_len = engine.assemble_buffer_for_key(key).len();
+        assert_eq!(synth_len, buckets * base_period, "synth playback must stay flat");
+
+        // Analysis mode applies the ratio: every bucket period scales by 1/ratio.
+        engine.shared_params.set_execution_mode(ExecutionMode::Analysis);
+        let analysis_len = engine.assemble_buffer_for_key(key).len();
+        let ratios = vec![2.0; buckets];
+        let expected: usize = (0..buckets)
+            .map(|b| bucket_period(base_period, &ratios, b))
+            .sum();
+        assert_eq!(analysis_len, expected, "ratio should transpose each bucket period");
+        assert!(analysis_len < synth_len, "ratio > 1 shortens the rendered note");
     }
 }
