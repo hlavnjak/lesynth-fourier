@@ -156,6 +156,49 @@ pub unsafe extern "C" fn lesynth_fourier_analyze(
     nb as i64
 }
 
+#[cfg(test)]
+mod ffi_tests {
+    use super::*;
+
+    #[test]
+    fn push_analysis_round_trips_contour() {
+        let samples = vec![0.1f32, 0.2, 0.3, 0.4];
+        let contour = vec![440.0f32, 441.0, 439.0];
+
+        // With a contour pointer.
+        let depth = unsafe {
+            lesynth_fourier_push_analysis(
+                samples.as_ptr(),
+                samples.len(),
+                44_100.0,
+                440.0,
+                contour.as_ptr(),
+                contour.len(),
+            )
+        };
+        assert!(depth >= 1);
+        let job = claim_analysis_job().expect("queued job");
+        assert_eq!(job.samples, samples);
+        assert_eq!(job.base_freq, 440.0);
+        assert_eq!(job.contour, contour, "contour must survive the FFI boundary");
+
+        // Null contour → flat (legacy), no crash.
+        let depth2 = unsafe {
+            lesynth_fourier_push_analysis(
+                samples.as_ptr(),
+                samples.len(),
+                44_100.0,
+                440.0,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert!(depth2 >= 1);
+        let job2 = claim_analysis_job().expect("queued job");
+        assert!(job2.contour.is_empty(), "null contour → empty");
+    }
+}
+
 #[cfg(all(debug_assertions, feature = "debug-logging"))]
 use std::sync::Once;
 #[cfg(all(debug_assertions, feature = "debug-logging"))]

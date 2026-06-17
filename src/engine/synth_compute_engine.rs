@@ -21,6 +21,12 @@ use crate::params::LeSynthParams;
 use super::{ChartType, ExecutionMode, SharedParams};
 use super::shared_params::BufferState;
 
+/// Upper bound on buckets when loading an analysed grid for playback. Each
+/// bucket renders one period per note, so this caps per-note buffer length and
+/// the cost of precomputing every key — keeping the DAW responsive in Analysis
+/// mode. Chosen near the synth-mode default so cost is comparable.
+const ANALYSIS_MAX_PLAYBACK_BUCKETS: usize = 128;
+
 /// Snapshot the per-bucket pitch ratios for playback — but only in Analysis
 /// mode. In Synth mode playback is always flat, so this returns empty and every
 /// bucket renders at the key's base period (no behaviour change for synth).
@@ -227,6 +233,11 @@ impl SynthComputeEngine {
         let base_period = piano_periods[key] as usize;
         // Per-bucket vibrato ratios apply only in Analysis mode; flat otherwise.
         let pitch_ratio = bucket_pitch_ratios(&self.shared_params);
+        // Hoist the per-harmonic enable flags out of the hot loops — locking
+        // them per sample (as before) cost a mutex round-trip for every output
+        // sample, making large analysis buffers crawl.
+        let harmonic_ampl_enabled = self.shared_params.harmonic_ampl_enabled.lock().unwrap();
+        let harmonic_phase_enabled = self.shared_params.harmonic_phase_enabled.lock().unwrap();
 
         // Calculate maximum usable harmonic for this key to prevent aliasing
         let max_harmonic = max_harmonic_for_key(key);
@@ -240,8 +251,6 @@ impl SynthComputeEngine {
             let max_h = num_harmonics.min(max_harmonic).min(period / 2);
             for t in 0..period {
                 let mut sample = 0.0;
-                let harmonic_ampl_enabled = self.shared_params.harmonic_ampl_enabled.lock().unwrap();
-                let harmonic_phase_enabled = self.shared_params.harmonic_phase_enabled.lock().unwrap();
                 for n in 0..max_h {
                     let amp = ampl_data_normalized[n][bucket];
                     if !harmonic_ampl_enabled[n] || amp == 0.0 {
@@ -626,6 +635,17 @@ impl SynthComputeEngine {
         contour: &[f32],
         num_buckets: usize,
     ) {
+        // Cap the grid for playback: every bucket renders one period per note,
+        // so the bucket count directly drives per-note buffer size and the
+        // synthesis cost across all keys. Period-synchronous mode (num_buckets
+        // == 0) would otherwise scale with the subtrack length (hundreds of
+        // buckets for a few seconds), bloating buffers and starving the async
+        // buffer thread. Keep it near the synth-mode order of magnitude.
+        let max_buckets = if num_buckets == 0 {
+            ANALYSIS_MAX_PLAYBACK_BUCKETS
+        } else {
+            (crate::constants::NUM_OF_BUCKETS_MAX as usize).min(ANALYSIS_MAX_PLAYBACK_BUCKETS.max(num_buckets))
+        };
         let mut result = super::analyze_subtrack(
             samples,
             sample_rate,
@@ -633,7 +653,7 @@ impl SynthComputeEngine {
             contour,
             num_buckets,
             NUM_HARMONICS,
-            crate::constants::NUM_OF_BUCKETS_MAX as usize,
+            max_buckets,
         );
         // Scale the (often very quiet) analysed grid up so the charts are
         // legible; resynthesis re-normalises separately.
@@ -766,6 +786,117 @@ mod tests {
         let normalized = engine.shared_params.amplitude_data_normalized.lock().unwrap();
         assert_eq!(normalized[0][0], 0.5); // 1.0 / 2.0
         assert_eq!(normalized[1][0], 0.5); // 1.0 / 2.0
+    }
+
+    /// A harmonic-rich tone, like a sustained instrument note.
+    fn tone(sr: f32, f: f32, secs: f32) -> Vec<f32> {
+        let n = (sr * secs) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / sr;
+                0.6 * (2.0 * std::f32::consts::PI * f * t).sin()
+                    + 0.3 * (2.0 * std::f32::consts::PI * 2.0 * f * t).sin()
+                    + 0.15 * (2.0 * std::f32::consts::PI * 3.0 * f * t).sin()
+            })
+            .collect()
+    }
+
+    fn max_abs(buf: &[f32]) -> f32 {
+        buf.iter().fold(0.0f32, |m, &x| m.max(x.abs()))
+    }
+
+    #[test]
+    fn analysis_playback_bucket_count_is_capped() {
+        // A multi-second note used to produce hundreds of period-synchronous
+        // buckets, bloating every per-note buffer and freezing playback.
+        let engine = create_test_engine();
+        engine.analyze_and_load(&tone(44100.0, 587.0, 3.0), 44100.0, 587.0, &[], 0);
+        let buckets = engine.shared_params.amplitude_data.lock().unwrap()[0].len();
+        assert!(buckets > 0, "no buckets produced");
+        assert!(
+            buckets <= ANALYSIS_MAX_PLAYBACK_BUCKETS,
+            "bucket count {} exceeds playback cap {}",
+            buckets,
+            ANALYSIS_MAX_PLAYBACK_BUCKETS
+        );
+    }
+
+    #[test]
+    fn analysis_load_populates_assembled_chart() {
+        let engine = create_test_engine();
+        engine.analyze_and_load(&tone(44100.0, 440.0, 1.0), 44100.0, 440.0, &[], 0);
+        let plotted = engine.shared_params.assembled_sound_plotted.lock().unwrap();
+        assert!(!plotted.is_empty(), "assembled chart is empty after analysis load");
+        assert!(max_abs(&plotted) > 0.01, "assembled chart is silent");
+    }
+
+    #[test]
+    fn analysis_playback_buffers_are_audible() {
+        let engine = create_test_engine();
+        engine.analyze_and_load(&tone(44100.0, 440.0, 1.0), 44100.0, 440.0, &[], 0);
+        // Both the synchronous (GUI fallback) and static (async thread) render
+        // paths must yield non-empty, non-silent audio for a range of keys.
+        for key in [0usize, 24, 48, 60] {
+            let inst = engine.assemble_buffer_for_key(key);
+            assert!(!inst.is_empty(), "instance buffer empty for key {}", key);
+            assert!(max_abs(&inst) > 0.01, "instance buffer silent for key {}", key);
+
+            let stat = SynthComputeEngine::compute_buffer_for_key_static(&engine.shared_params, key);
+            assert!(!stat.is_empty(), "static buffer empty for key {}", key);
+            assert!(max_abs(&stat) > 0.01, "static buffer silent for key {}", key);
+        }
+    }
+
+    #[test]
+    fn analysis_vibrato_contour_reaches_playback() {
+        // End-to-end: a vibrato tone + its contour → analyze_and_load → the
+        // per-bucket pitch ratios are stored and playback stays audible. This
+        // is the flow the host drives when opening an audio file.
+        let sr = 44100.0;
+        let base = 440.0f32;
+        let (depth, rate) = (0.03f32, 5.0f32);
+        let n = (sr * 1.5) as usize;
+        let mut phase = 0.0f32;
+        let mut samples = Vec::with_capacity(n);
+        let mut contour = Vec::new();
+        for i in 0..n {
+            let t = i as f32 / sr;
+            let f = base * (1.0 + depth * (2.0 * std::f32::consts::PI * rate * t).sin());
+            phase += 2.0 * std::f32::consts::PI * f / sr;
+            samples.push(phase.sin());
+            if i % 256 == 0 {
+                contour.push(f);
+            }
+        }
+
+        let engine = create_test_engine();
+        engine.analyze_and_load(&samples, sr, base, &contour, 0);
+        assert_eq!(engine.shared_params.execution_mode(), ExecutionMode::Analysis);
+
+        // Stored ratios must reflect the vibrato (not all flat).
+        let ratios = engine.shared_params.bucket_pitch_ratio.lock().unwrap().clone();
+        let hi = ratios.iter().cloned().fold(f32::MIN, f32::max);
+        let lo = ratios.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(hi - lo > 0.02, "vibrato not reflected in playback ratios: [{lo}, {hi}]");
+
+        // Playback still produces audible audio.
+        let buf = engine.assemble_buffer_for_key(48);
+        assert!(max_abs(&buf) > 0.01, "vibrato playback is silent");
+    }
+
+    #[test]
+    fn synth_mode_buffers_unaffected_by_stale_ratios() {
+        // Leftover analysis ratios must never bend synth-mode playback.
+        let engine = create_test_engine();
+        let buckets = engine.shared_params.amplitude_data.lock().unwrap()[0].len();
+        {
+            let mut r = engine.shared_params.bucket_pitch_ratio.lock().unwrap();
+            *r = vec![1.5; buckets];
+        }
+        engine.shared_params.set_execution_mode(ExecutionMode::Synth);
+        let base_period = engine.shared_params.piano_periods.lock().unwrap()[36] as usize;
+        let len = engine.assemble_buffer_for_key(36).len();
+        assert_eq!(len, buckets * base_period, "synth playback must ignore ratios");
     }
 
     #[test]
