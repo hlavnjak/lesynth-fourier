@@ -56,9 +56,17 @@ pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engi
             let y_min = bounds.min()[1];
             let y_max = bounds.max()[1];
 
-            // Reset view to default range (0-2000) when parameters are edited
+            // Reset view to show the *entire* assembled signal when parameters
+            // are edited. Analysis-mode buffers span all buckets (tens of
+            // thousands of samples), so a fixed 0-2000 window cropped the chart
+            // to a sliver; fit the x-range to the actual buffer length instead.
             if should_reset_view {
-                let default_bounds = PlotBounds::from_min_max([0.0, -1.0], [2000.0, 1.0]);
+                let x_max = if assembled.is_empty() {
+                    2000.0
+                } else {
+                    assembled.len() as f64
+                };
+                let default_bounds = PlotBounds::from_min_max([0.0, -1.0], [x_max, 1.0]);
                 plot_ui.set_plot_bounds(default_bounds);
             } else if x_min < 0.0 {
                 let clamped_bounds = PlotBounds::from_min_max([0.0, y_min], [x_max, y_max]);
