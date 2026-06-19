@@ -17,15 +17,9 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 use crate::constants::{NUM_HARMONICS, NUM_OF_BUCKETS_DEFAULT, TWO_PI, NUM_KEYS, max_harmonic_for_key};
-use crate::params::LeSynthParams;
+use crate::params::{CurveType, LeSynthParams};
 use super::{ChartType, ExecutionMode, SharedParams};
 use super::shared_params::BufferState;
-
-/// Upper bound on buckets when loading an analysed grid for playback. Each
-/// bucket renders one period per note, so this caps per-note buffer length and
-/// the cost of precomputing every key — keeping the DAW responsive in Analysis
-/// mode. Chosen near the synth-mode default so cost is comparable.
-const ANALYSIS_MAX_PLAYBACK_BUCKETS: usize = 128;
 
 /// Snapshot the per-bucket pitch ratios for playback — but only in Analysis
 /// mode. In Synth mode playback is always flat, so this returns empty and every
@@ -43,6 +37,113 @@ fn bucket_pitch_ratios(shared_params: &SharedParams) -> Vec<f32> {
 fn bucket_period(base_period: usize, ratios: &[f32], bucket: usize) -> usize {
     let r = ratios.get(bucket).copied().unwrap_or(1.0);
     ((base_period as f32 / r.max(1e-3)).round() as usize).max(2)
+}
+
+/// Render a key's waveform from an amp/phase grid. This is the single render
+/// path shared by Synth and Analysis modes — they must not diverge — and by
+/// both the synchronous (GUI) and background-thread callers.
+///
+/// Each rendered chunk is exactly one fundamental cycle of the played key
+/// (`bucket_period`), so every harmonic completes an integer number of cycles
+/// and consecutive chunks stay phase-aligned regardless of period length.
+///
+/// `target_samples` selects the timeline:
+/// * `0` → **Synth mode**: render one period per bucket, in order
+///   (legacy behaviour; total length = `Σ bucket_period`).
+/// * `> 0` → **Analysis mode** ("preserve seconds"): render exactly
+///   `target_samples` samples and pick each chunk's bucket by its position in
+///   time (`produced / target_samples`). The note then lasts the source's
+///   wall-clock duration at *every* key — low keys play few long periods, high
+///   keys many short ones — so the bucket count no longer drives buffer length.
+///
+/// When `cancel` is supplied (background thread) the render bails out early on
+/// request and periodically yields so the GUI stays responsive.
+fn render_key_buffer(
+    num_harmonics: usize,
+    ampl: &[Vec<f32>],
+    phase: &[Vec<f32>],
+    ampl_enabled: &[bool],
+    phase_enabled: &[bool],
+    base_period: usize,
+    max_harmonic: usize,
+    ratios: &[f32],
+    target_samples: usize,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Vec<f32> {
+    let num_buckets = ampl.first().map(|r| r.len()).unwrap_or(0);
+    if num_buckets == 0 {
+        return Vec::new();
+    }
+    let drive_by_time = target_samples > 0;
+
+    let mut sound: Vec<f32> = Vec::new();
+    let mut produced = 0usize;
+    let mut chunk = 0usize;
+    let mut last_yield = 0usize;
+    loop {
+        let bucket = if drive_by_time {
+            if produced >= target_samples {
+                break;
+            }
+            (((produced as f32 / target_samples as f32) * num_buckets as f32) as usize)
+                .min(num_buckets - 1)
+        } else {
+            if chunk >= num_buckets {
+                break;
+            }
+            chunk
+        };
+
+        if let Some(c) = cancel {
+            if c.load(Ordering::Relaxed) {
+                return Vec::new();
+            }
+            // Yield by produced samples (period count varies wildly with key).
+            if produced - last_yield >= 8192 {
+                thread::sleep(Duration::from_millis(1));
+                last_yield = produced;
+            }
+        }
+
+        let period = bucket_period(base_period, ratios, bucket);
+        let max_h = num_harmonics.min(max_harmonic).min(period / 2);
+        for t in 0..period {
+            let mut sample = 0.0;
+            for n in 0..max_h {
+                let amp = ampl[n][bucket];
+                if !ampl_enabled[n] || amp == 0.0 {
+                    continue;
+                }
+                let ph = if phase_enabled[n] {
+                    phase[n][bucket]
+                } else {
+                    0.0
+                };
+                sample += amp
+                    * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + ph).sin();
+            }
+            sound.push(sample.clamp(-1.0, 1.0));
+        }
+        produced += period;
+        chunk += 1;
+    }
+    sound
+}
+
+/// Playback length in samples for `key`: `0` in Synth mode (caller renders one
+/// period per bucket), or the source's wall-clock duration at the playback
+/// sample rate in Analysis mode ("preserve seconds").
+fn target_samples_for(shared_params: &SharedParams) -> usize {
+    if shared_params.execution_mode() != ExecutionMode::Analysis {
+        return 0;
+    }
+    let duration = *shared_params.analysis_duration_secs.lock().unwrap();
+    let sr = *shared_params.sample_rate.lock().unwrap();
+    if duration > 0.0 && sr > 0.0 {
+        (duration * sr).round() as usize
+    } else {
+        0
+    }
 }
 
 #[derive(Clone)]
@@ -70,6 +171,27 @@ impl SynthComputeEngine {
             ChartType::Amp => self.synth_params.harmonics[n].wobble_amp_amp.value(),
             ChartType::Phase => self.synth_params.harmonics[n].wobble_amp_phase.value(),
         };
+
+        let needs_update = {
+            let data = match chart_type {
+                ChartType::Amp => self.shared_params.amplitude_data.lock().unwrap(),
+                ChartType::Phase => self.shared_params.phase_data.lock().unwrap(),
+            };
+            data[n][0] != value || wobble_amp > 0.0
+        };
+        if needs_update {
+            self.fill_constant_curve_forced(n, value, chart_type);
+        }
+    }
+
+    /// Like [`Self::fill_constant_curve`] but always rewrites the whole row,
+    /// skipping the "bucket 0 already matches" early-out. Needed when overwriting
+    /// an analysed row (where only bucket 0 might coincide with `value`).
+    fn fill_constant_curve_forced(&self, n: usize, value: f32, chart_type: ChartType) {
+        let wobble_amp = match chart_type {
+            ChartType::Amp => self.synth_params.harmonics[n].wobble_amp_amp.value(),
+            ChartType::Phase => self.synth_params.harmonics[n].wobble_amp_phase.value(),
+        };
         let wobble_freq = match chart_type {
             ChartType::Amp => self.synth_params.harmonics[n].wobble_freq_amp.value(),
             ChartType::Phase => self.synth_params.harmonics[n].wobble_freq_phase.value(),
@@ -79,28 +201,25 @@ impl SynthComputeEngine {
             ChartType::Amp => self.shared_params.amplitude_data.lock().unwrap(),
             ChartType::Phase => self.shared_params.phase_data.lock().unwrap(),
         };
-        
-        let needs_update = data[n][0] != value || wobble_amp > 0.0;
-        if needs_update {
-            for bucket in 0..data[n].len() {
-                let wobble = if wobble_amp > 0.0 {
-                    wobble_amp * (wobble_freq * bucket as f32 * 0.01).sin()
-                } else {
-                    0.0
-                };
-                let final_value = match chart_type {
-                    ChartType::Amp => (value + wobble).clamp(0.0, 1.0),
-                    ChartType::Phase => value + wobble,
-                };
-                data[n][bucket] = final_value;
-            }
-            self.set_normalization_needed(true);
-            // Mark all buffers as dirty since harmonic parameters changed
-            drop(data); // Release the lock before calling mark_all_buffers_dirty
-            self.shared_params.mark_all_buffers_dirty();
-            // Update assembled chart with key 24 for immediate preview
-            self.update_assembled_chart_with_key24();
+
+        for bucket in 0..data[n].len() {
+            let wobble = if wobble_amp > 0.0 {
+                wobble_amp * (wobble_freq * bucket as f32 * 0.01).sin()
+            } else {
+                0.0
+            };
+            let final_value = match chart_type {
+                ChartType::Amp => (value + wobble).clamp(0.0, 1.0),
+                ChartType::Phase => value + wobble,
+            };
+            data[n][bucket] = final_value;
         }
+        self.set_normalization_needed(true);
+        // Mark all buffers as dirty since harmonic parameters changed
+        drop(data); // Release the lock before calling mark_all_buffers_dirty
+        self.shared_params.mark_all_buffers_dirty();
+        // Update assembled chart with key 24 for immediate preview
+        self.update_assembled_chart_with_key24();
     }
 
     pub fn fill_sin_curve(&self, n: usize, chart_type: ChartType) {
@@ -241,32 +360,21 @@ impl SynthComputeEngine {
 
         // Calculate maximum usable harmonic for this key to prevent aliasing
         let max_harmonic = max_harmonic_for_key(key);
+        // Synth mode: one period per bucket. Analysis mode: the source duration.
+        let target_samples = target_samples_for(&self.shared_params);
 
-        let mut sound = Vec::new();
-        for bucket in 0..ampl_data_normalized[0].len() {
-            // Transpose this bucket's period by the local pitch ratio. Each
-            // bucket still renders exactly one fundamental cycle, so harmonics
-            // complete integer cycles and bucket boundaries stay phase-aligned.
-            let period = bucket_period(base_period, &pitch_ratio, bucket);
-            let max_h = num_harmonics.min(max_harmonic).min(period / 2);
-            for t in 0..period {
-                let mut sample = 0.0;
-                for n in 0..max_h {
-                    let amp = ampl_data_normalized[n][bucket];
-                    if !harmonic_ampl_enabled[n] || amp == 0.0 {
-                        continue;
-                    }
-                    let phase = if harmonic_phase_enabled[n] {
-                        phase_data[n][bucket]
-                    } else {
-                        0.0
-                    };
-                    sample += amp
-                        * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + phase).sin();
-                }
-                sound.push(sample.clamp(-1.0, 1.0));
-            }
-        }
+        let sound = render_key_buffer(
+            num_harmonics,
+            &ampl_data_normalized,
+            &phase_data,
+            &harmonic_ampl_enabled,
+            &harmonic_phase_enabled,
+            base_period,
+            max_harmonic,
+            &pitch_ratio,
+            target_samples,
+            None,
+        );
 
         let elapsed = start_time.elapsed();
         log::trace!("assemble_buffer_for_key(key={}) took: {:?} (base_period={}, total_samples={}, max_harmonic={}/{})",
@@ -440,7 +548,7 @@ impl SynthComputeEngine {
         let max_harmonic = max_harmonic_for_key(key);
 
         // Copy all required data once and release locks immediately to avoid blocking GUI
-        let (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, base_period, pitch_ratio) = {
+        let (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, base_period, pitch_ratio, target_samples) = {
             let ampl_data_normalized = shared_params.amplitude_data_normalized.lock().unwrap();
             let phase_data = shared_params.phase_data.lock().unwrap();
             let piano_periods = shared_params.piano_periods.lock().unwrap();
@@ -457,47 +565,25 @@ impl SynthComputeEngine {
             let harmonic_phase_enabled_copy: Vec<bool> = harmonic_phase_enabled.clone();
             // Per-bucket vibrato ratios (Analysis mode only; empty → flat).
             let pitch_ratio = bucket_pitch_ratios(shared_params);
+            // Synth mode: one period per bucket. Analysis mode: source duration.
+            let target_samples = target_samples_for(shared_params);
 
-            (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, base_period, pitch_ratio)
+            (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, base_period, pitch_ratio, target_samples)
         }; // All locks are released here
 
-        let mut sound = Vec::new();
-        for bucket in 0..ampl_data_copy[0].len() {
-            // Check for cancellation periodically
-            if shared_params.computation_cancel.load(Ordering::Relaxed) {
-                log::debug!("Computation cancelled for key {} during bucket {}", key, bucket);
-                return Vec::new(); // Return empty buffer on cancellation
-            }
+        let sound = render_key_buffer(
+            num_harmonics,
+            &ampl_data_copy,
+            &phase_data_copy,
+            &harmonic_ampl_enabled_copy,
+            &harmonic_phase_enabled_copy,
+            base_period,
+            max_harmonic,
+            &pitch_ratio,
+            target_samples,
+            Some(&shared_params.computation_cancel),
+        );
 
-            // Yield to other threads every few buckets to keep GUI responsive
-            if bucket % 10 == 0 && bucket > 0 {
-                thread::sleep(Duration::from_millis(1));
-            }
-
-            // Transpose this bucket's period by the local pitch ratio. Each
-            // bucket still renders exactly one fundamental cycle, so harmonics
-            // complete integer cycles and bucket boundaries stay phase-aligned.
-            let period = bucket_period(base_period, &pitch_ratio, bucket);
-            let max_h = num_harmonics.min(max_harmonic).min(period / 2);
-            for t in 0..period {
-                let mut sample = 0.0;
-                for n in 0..max_h {
-                    let amp = ampl_data_copy[n][bucket];
-                    if !harmonic_ampl_enabled_copy[n] || amp == 0.0 {
-                        continue;
-                    }
-                    let phase = if harmonic_phase_enabled_copy[n] {
-                        phase_data_copy[n][bucket]
-                    } else {
-                        0.0
-                    };
-                    sample += amp
-                        * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + phase).sin();
-                }
-                sound.push(sample.clamp(-1.0, 1.0));
-            }
-        }
-        
         let elapsed = start_time.elapsed();
         log::trace!("async compute_buffer_for_key(key={}) took: {:?} (base_period={}, total_samples={}, max_harmonic={}/{})",
                  key, elapsed, base_period, sound.len(), max_harmonic, num_harmonics);
@@ -602,6 +688,24 @@ impl SynthComputeEngine {
             }
             // Keep the normalized grid the same shape as the new data.
             *norm = vec![vec![0.0; buckets]; n];
+
+            // Snapshot the pristine analysis grid so a per-harmonic "custom"
+            // override can be undone (restoring the analysed row), and clear any
+            // existing overrides — freshly loaded data starts fully analysed.
+            *self.shared_params.analysis_amplitude_data.lock().unwrap() = amp.clone();
+            *self.shared_params.analysis_phase_data.lock().unwrap() = phase.clone();
+            self.shared_params
+                .harmonic_ampl_custom
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .for_each(|c| *c = false);
+            self.shared_params
+                .harmonic_phase_custom
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .for_each(|c| *c = false);
         }
 
         {
@@ -623,6 +727,64 @@ impl SynthComputeEngine {
         );
     }
 
+    /// Toggle the per-harmonic "custom curve" override used in Analysis mode.
+    ///
+    /// When `custom` is `true`, harmonic `n`'s analysed amplitude/phase row is
+    /// overwritten by the user's Synth-mode curve — Constant or Nested Fourier,
+    /// per the harmonic's curve-type param — so the user can replace a single
+    /// analysed harmonic with one they shaped by hand. When `false`, the row is
+    /// restored from the pristine analysis snapshot captured in `load_analysis`.
+    pub fn set_harmonic_custom(&self, n: usize, chart_type: ChartType, custom: bool) {
+        {
+            let mut flags = match chart_type {
+                ChartType::Amp => self.shared_params.harmonic_ampl_custom.lock().unwrap(),
+                ChartType::Phase => self.shared_params.harmonic_phase_custom.lock().unwrap(),
+            };
+            if n >= flags.len() {
+                return;
+            }
+            flags[n] = custom;
+        }
+
+        if custom {
+            let curve_type = match chart_type {
+                ChartType::Amp => self.synth_params.harmonics[n].curve_type_amp.value(),
+                ChartType::Phase => self.synth_params.harmonics[n].curve_type_phase.value(),
+            };
+            match curve_type {
+                CurveType::Constant => {
+                    let offset = match chart_type {
+                        ChartType::Amp => self.synth_params.harmonics[n].curve_offset_amp.value(),
+                        ChartType::Phase => self.synth_params.harmonics[n].curve_offset_phase.value(),
+                    };
+                    self.fill_constant_curve_forced(n, offset, chart_type);
+                }
+                CurveType::NestedFourier => self.fill_nested_fourier_curve(n, chart_type),
+            }
+        } else {
+            {
+                let snapshot = match chart_type {
+                    ChartType::Amp => self.shared_params.analysis_amplitude_data.lock().unwrap(),
+                    ChartType::Phase => self.shared_params.analysis_phase_data.lock().unwrap(),
+                };
+                let mut data = match chart_type {
+                    ChartType::Amp => self.shared_params.amplitude_data.lock().unwrap(),
+                    ChartType::Phase => self.shared_params.phase_data.lock().unwrap(),
+                };
+                if let (Some(src), Some(dst)) = (snapshot.get(n), data.get_mut(n)) {
+                    if dst.len() == src.len() {
+                        dst.copy_from_slice(src);
+                    } else {
+                        *dst = src.clone();
+                    }
+                }
+            }
+            self.set_normalization_needed(true);
+            self.shared_params.mark_all_buffers_dirty();
+            self.update_assembled_chart_with_key24();
+        }
+    }
+
     /// Analyse a subtrack and load the resulting grid, switching to Analysis
     /// mode. `num_buckets == 0` lets the analyser pick period-synchronous
     /// buckets. `contour` is the host's per-position fundamental (absolute Hz,
@@ -635,17 +797,14 @@ impl SynthComputeEngine {
         contour: &[f32],
         num_buckets: usize,
     ) {
-        // Cap the grid for playback: every bucket renders one period per note,
-        // so the bucket count directly drives per-note buffer size and the
-        // synthesis cost across all keys. Period-synchronous mode (num_buckets
-        // == 0) would otherwise scale with the subtrack length (hundreds of
-        // buckets for a few seconds), bloating buffers and starving the async
-        // buffer thread. Keep it near the synth-mode order of magnitude.
-        let max_buckets = if num_buckets == 0 {
-            ANALYSIS_MAX_PLAYBACK_BUCKETS
-        } else {
-            (crate::constants::NUM_OF_BUCKETS_MAX as usize).min(ANALYSIS_MAX_PLAYBACK_BUCKETS.max(num_buckets))
-        };
+        // The bucket grid is period-synchronous (num_buckets == 0): its size
+        // tracks the source length and is no longer clamped to a small playback
+        // cap. Playback length is now decoupled from the bucket count — every
+        // key renders the source's wall-clock duration ("preserve seconds", see
+        // `render_key_buffer`) — so a fine grid no longer bloats per-note
+        // buffers. Only a generous safety bound remains, to keep the charts and
+        // the per-bucket DFT sane on very long inputs.
+        let max_buckets = (crate::constants::NUM_OF_BUCKETS_MAX as usize).max(num_buckets);
         let mut result = super::analyze_subtrack(
             samples,
             sample_rate,
@@ -658,6 +817,14 @@ impl SynthComputeEngine {
         // Scale the (often very quiet) analysed grid up so the charts are
         // legible; resynthesis re-normalises separately.
         super::normalize_for_display(&mut result, 0.9);
+        // Record the source duration so playback lasts the same wall-clock time
+        // at every key (pitch-independent), regardless of the played period.
+        let duration_secs = if sample_rate > 0.0 {
+            samples.len() as f32 / sample_rate
+        } else {
+            0.0
+        };
+        *self.shared_params.analysis_duration_secs.lock().unwrap() = duration_secs;
         self.shared_params
             .set_execution_mode(super::ExecutionMode::Analysis);
         self.load_analysis(&result);
@@ -806,19 +973,33 @@ mod tests {
     }
 
     #[test]
-    fn analysis_playback_bucket_count_is_capped() {
-        // A multi-second note used to produce hundreds of period-synchronous
-        // buckets, bloating every per-note buffer and freezing playback.
+    fn analysis_grid_is_uncapped_and_preserves_seconds() {
+        // The old 128-bucket playback cap is gone: a multi-second note keeps a
+        // fine, source-tracking grid (playback length is now decoupled from the
+        // bucket count). And every key renders the source's wall-clock duration
+        // ("preserve seconds"), independent of the played key's period.
         let engine = create_test_engine();
-        engine.analyze_and_load(&tone(44100.0, 587.0, 3.0), 44100.0, 587.0, &[], 0);
+        let sr = 44100.0;
+        let secs = 3.0;
+        engine.analyze_and_load(&tone(sr, 587.0, secs), sr, 587.0, &[], 0);
+
         let buckets = engine.shared_params.amplitude_data.lock().unwrap()[0].len();
-        assert!(buckets > 0, "no buckets produced");
-        assert!(
-            buckets <= ANALYSIS_MAX_PLAYBACK_BUCKETS,
-            "bucket count {} exceeds playback cap {}",
-            buckets,
-            ANALYSIS_MAX_PLAYBACK_BUCKETS
-        );
+        assert!(buckets > 128, "grid should no longer be capped at 128, got {}", buckets);
+
+        let target = (secs * sr) as i64;
+        for key in [0usize, 24, 48, 72] {
+            let len = engine.assemble_buffer_for_key(key).len() as i64;
+            let period = engine.shared_params.piano_periods.lock().unwrap()[key] as i64;
+            // The render overshoots the target by at most one final period.
+            assert!(
+                len >= target && len - target <= period,
+                "key {} len {} not ~{} (period {})",
+                key,
+                len,
+                target,
+                period
+            );
+        }
     }
 
     #[test]
@@ -828,6 +1009,32 @@ mod tests {
         let plotted = engine.shared_params.assembled_sound_plotted.lock().unwrap();
         assert!(!plotted.is_empty(), "assembled chart is empty after analysis load");
         assert!(max_abs(&plotted) > 0.01, "assembled chart is silent");
+    }
+
+    #[test]
+    fn custom_override_toggles_flag_and_restores_analysed_row() {
+        let engine = create_test_engine();
+        engine.analyze_and_load(&tone(44100.0, 440.0, 1.0), 44100.0, 440.0, &[], 0);
+        let h = 1usize;
+
+        // Fresh analysis: override flags default off and the snapshot matches the
+        // live grid.
+        assert!(!engine.shared_params.harmonic_ampl_custom.lock().unwrap()[h]);
+        let snapshot = engine.shared_params.analysis_amplitude_data.lock().unwrap()[h].clone();
+        assert_eq!(snapshot, engine.shared_params.amplitude_data.lock().unwrap()[h]);
+
+        // Enabling the override sets the flag and rewrites the row.
+        engine.set_harmonic_custom(h, ChartType::Amp, true);
+        assert!(engine.shared_params.harmonic_ampl_custom.lock().unwrap()[h]);
+
+        // Scribble over the live row to prove the restore actually rewrites it,
+        // then disable the override: the analysed row must come back verbatim.
+        engine.shared_params.amplitude_data.lock().unwrap()[h]
+            .iter_mut()
+            .for_each(|v| *v = 0.123);
+        engine.set_harmonic_custom(h, ChartType::Amp, false);
+        assert!(!engine.shared_params.harmonic_ampl_custom.lock().unwrap()[h]);
+        assert_eq!(snapshot, engine.shared_params.amplitude_data.lock().unwrap()[h]);
     }
 
     #[test]
@@ -898,6 +1105,7 @@ mod tests {
         let len = engine.assemble_buffer_for_key(36).len();
         assert_eq!(len, buckets * base_period, "synth playback must ignore ratios");
     }
+
 
     #[test]
     fn bucket_period_scales_with_ratio() {

@@ -35,12 +35,34 @@ pub struct SharedParams {
     /// no vibrato). Applied only in Analysis execution mode, where it transposes
     /// each bucket's rendered period so vibrato/drift becomes audible.
     pub bucket_pitch_ratio: Arc<Mutex<Vec<f32>>>,
+    /// Current playback sample rate (Hz). Kept alongside `piano_periods` so the
+    /// Analysis-mode render can turn a wall-clock duration into a sample count.
+    pub sample_rate: Arc<Mutex<f32>>,
+    /// Source duration (seconds) of the most recently loaded analysis subtrack.
+    /// In Analysis mode every key renders this many seconds of audio ("preserve
+    /// seconds": note length is pitch-independent), so the bucket grid is mapped
+    /// across `analysis_duration_secs * sample_rate` samples regardless of key.
+    /// `0.0` means "no analysis loaded" → fall back to one period per bucket.
+    pub analysis_duration_secs: Arc<Mutex<f32>>,
     pub voices: Arc<Mutex<Vec<Option<Voice>>>>,
     pub assembled_sound_plotted: Arc<Mutex<Vec<f32>>>,
     pub piano_periods: Arc<Mutex<Vec<u32>>>,
     pub normalization_needed: Arc<Mutex<bool>>,
     pub harmonic_ampl_enabled: Arc<Mutex<Vec<bool>>>,
     pub harmonic_phase_enabled: Arc<Mutex<Vec<bool>>>,
+    /// Per-harmonic "use my custom Synth-mode curve instead of the analysed one"
+    /// flags, for Analysis mode (amplitude / phase, independently). Default
+    /// `false` everywhere so freshly loaded analysis data plays back as analysed
+    /// and plain Synth mode is unaffected. When a flag is `true`, the harmonic's
+    /// `amplitude_data` / `phase_data` row is overwritten by the user's Synth
+    /// curve (Constant / Nested Fourier); when cleared it is restored from
+    /// [`Self::analysis_amplitude_data`] / [`Self::analysis_phase_data`].
+    pub harmonic_ampl_custom: Arc<Mutex<Vec<bool>>>,
+    pub harmonic_phase_custom: Arc<Mutex<Vec<bool>>>,
+    /// Pristine copy of the most recently loaded analysis grid, used to restore a
+    /// harmonic's row when its "custom" override is switched back off.
+    pub analysis_amplitude_data: Arc<Mutex<Vec<Vec<f32>>>>,
+    pub analysis_phase_data: Arc<Mutex<Vec<Vec<f32>>>>,
     pub fade_duration: usize,
     
     // Async buffer computation
@@ -64,12 +86,18 @@ impl SharedParams {
             amplitude_data_normalized: Arc::new(Mutex::new(vec![vec![0.0; buckets]; num_harmonics])),
             phase_data: Arc::new(Mutex::new(vec![vec![0.0; buckets]; num_harmonics])),
             bucket_pitch_ratio: Arc::new(Mutex::new(vec![1.0; buckets])),
+            sample_rate: Arc::new(Mutex::new(44100.0)),
+            analysis_duration_secs: Arc::new(Mutex::new(0.0)),
             voices: Arc::new(Mutex::new(vec![None; NUM_KEYS])),
             assembled_sound_plotted: Arc::new(Mutex::new(Vec::new())),
             piano_periods: Arc::new(Mutex::new(Self::populate_piano_periods())),
             normalization_needed: Arc::new(Mutex::new(false)),
             harmonic_ampl_enabled: Arc::new(Mutex::new(vec![true; num_harmonics])),
             harmonic_phase_enabled: Arc::new(Mutex::new(vec![true; num_harmonics])),
+            harmonic_ampl_custom: Arc::new(Mutex::new(vec![false; num_harmonics])),
+            harmonic_phase_custom: Arc::new(Mutex::new(vec![false; num_harmonics])),
+            analysis_amplitude_data: Arc::new(Mutex::new(vec![vec![0.0; buckets]; num_harmonics])),
+            analysis_phase_data: Arc::new(Mutex::new(vec![vec![0.0; buckets]; num_harmonics])),
             fade_duration: 128,
             
             // Async buffer computation - initialize all buffers as dirty
@@ -102,6 +130,7 @@ impl SharedParams {
         let new_periods = Self::compute_piano_periods(sample_rate as f64);
         let mut piano_periods = self.piano_periods.lock().unwrap();
         *piano_periods = new_periods;
+        *self.sample_rate.lock().unwrap() = sample_rate;
     }
 
     fn compute_piano_periods(sample_rate: f64) -> Vec<u32> {

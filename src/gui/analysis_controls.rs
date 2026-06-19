@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 use nih_plug_egui::egui::{self, Color32, RichText};
-use crate::engine::SynthComputeEngine;
+use crate::engine::{ChartType, SynthComputeEngine};
 
 pub fn draw_analysis_controls(
     ui: &mut egui::Ui,
@@ -40,7 +40,8 @@ pub fn draw_analysis_controls(
     ui.label(
         RichText::new(
             "The amplitude / phase grid below was extracted from the input audio. \
-             Enable or disable harmonics to shape the resynthesis.",
+             Enable or disable harmonics to shape the resynthesis. Tick \"cust\" to \
+             override a harmonic's analysed curve with your Synth-mode curve.",
         )
         .size(11.0)
         .color(Color32::from_gray(190)),
@@ -52,14 +53,19 @@ pub fn draw_analysis_controls(
     // Snapshot current enable flags, render toggles, write back any change.
     let mut amp_enabled = shared.harmonic_ampl_enabled.lock().unwrap().clone();
     let mut phase_enabled = shared.harmonic_phase_enabled.lock().unwrap().clone();
+    // Custom-override flags are applied through the engine (which rewrites /
+    // restores the harmonic's row), so toggle them immediately on change.
+    let mut amp_custom = shared.harmonic_ampl_custom.lock().unwrap().clone();
+    let mut phase_custom = shared.harmonic_phase_custom.lock().unwrap().clone();
 
     egui::ScrollArea::vertical()
         .id_salt("analysis_harmonic_toggles")
         .auto_shrink([false; 2])
         .max_height(220.0)
         .show(ui, |ui| {
-            // Lay the harmonics out in columns so 64 of them fit.
-            let cols = (window_width / 150.0).floor().max(1.0) as usize;
+            // Lay the harmonics out in columns. Each entry now carries four
+            // toggles (amp / amp-custom / phase / phase-custom), so widen them.
+            let cols = (window_width / 240.0).floor().max(1.0) as usize;
             let per_col = num_harmonics.div_ceil(cols);
             ui.horizontal_top(|ui| {
                 for c in 0..cols {
@@ -83,11 +89,35 @@ pub fn draw_analysis_controls(
                                     changed = true;
                                 }
                                 if ui
+                                    .checkbox(&mut amp_custom[n], "cust")
+                                    .on_hover_text(
+                                        "Override the analysed amplitude curve with your \
+                                         Synth-mode curve (Constant / Nested Fourier)",
+                                    )
+                                    .changed()
+                                {
+                                    engine.set_harmonic_custom(n, ChartType::Amp, amp_custom[n]);
+                                }
+                                if ui
                                     .checkbox(&mut phase_enabled[n], "phase")
                                     .on_hover_text("Apply this harmonic's analysed phase")
                                     .changed()
                                 {
                                     changed = true;
+                                }
+                                if ui
+                                    .checkbox(&mut phase_custom[n], "cust")
+                                    .on_hover_text(
+                                        "Override the analysed phase curve with your \
+                                         Synth-mode curve (Constant / Nested Fourier)",
+                                    )
+                                    .changed()
+                                {
+                                    engine.set_harmonic_custom(
+                                        n,
+                                        ChartType::Phase,
+                                        phase_custom[n],
+                                    );
                                 }
                             });
                         }
