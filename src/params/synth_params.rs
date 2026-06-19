@@ -30,8 +30,13 @@ pub struct LeSynthParams {
     #[id = "num_buckets"]
     pub num_buckets: IntParam,
 
+    // Heap-allocated (not an inline `[HarmonicParam; NUM_HARMONICS]`): each
+    // `HarmonicParam` is ~3 KB, so at NUM_HARMONICS = 256 an inline array makes
+    // `LeSynthParams` ~700 KB and constructing it by value (default → Arc::new)
+    // overflows smaller (e.g. test) thread stacks. A `Vec` keeps the struct
+    // pointer-sized; `#[nested(array)]` only needs `.iter()`, which `Vec` has.
     #[nested(array, group = "harmonics")]
-    pub harmonics: [HarmonicParam; NUM_HARMONICS],
+    pub harmonics: Vec<HarmonicParam>,
 }
 
 impl Default for LeSynthParams {
@@ -62,7 +67,7 @@ impl Default for LeSynthParams {
         let wobble_amp_range = FloatRange::Linear { min: 0.0, max: 0.2 };
         let wobble_freq_range = FloatRange::Linear { min: 10.0, max: 200.0 };
 
-        let harmonics = std::array::from_fn(|i| {
+        let harmonics: Vec<HarmonicParam> = (0..NUM_HARMONICS).map(|i| {
             let idx = i + 1;
             let amp = if idx > 10 { 0.05 } else { default_amp };
             HarmonicParam {
@@ -134,7 +139,7 @@ impl Default for LeSynthParams {
                 ),
                 nested_fourier: Arc::new(RwLock::new(NestedFourierState::default())),
             }
-        });
+        }).collect();
 
         Self {
             // These dimensions are overriden by actual window size

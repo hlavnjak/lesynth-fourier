@@ -118,9 +118,21 @@ pub fn normalize_for_display(result: &mut AnalysisResult, target: f32) {
     }
 }
 
-/// Amplitudes below this are treated as silence: the harmonic is zeroed and its
-/// phase left at 0 (phase of near-silence is meaningless noise).
-const AMP_FLOOR: f32 = 0.004;
+/// Absolute noise gate: a harmonic whose raw DFT amplitude is below this is
+/// always treated as silence (keeps pure DC/noise from inventing a tone).
+const AMP_FLOOR_ABS: f32 = 0.0004;
+/// Relative amplitude gate, as a fraction of the *whole grid's* strongest
+/// harmonic. Referencing the global maximum — not the local bucket or an
+/// absolute level — means genuinely quiet but real *sustained* harmonics
+/// survive on quiet recordings (the upper harmonics that an absolute floor used
+/// to erase), while near-silent attack/decay buckets stay zeroed.
+const AMP_FLOOR_REL: f32 = 0.004;
+/// Phase-reliability gate, as a fraction of each *bucket's* strongest harmonic.
+/// A harmonic quieter than this still contributes its amplitude, but its phase
+/// is left at 0 (cosine-aligned). The phase of a weak harmonic is mostly noise;
+/// emitting it would make consecutive buckets start incoherently and buzz, so
+/// only the harmonics strong enough to carry a trustworthy phase get one.
+const PHASE_REL: f32 = 0.05;
 
 /// Local periods spanned per bucket in period-synchronous mode (`num_buckets ==
 /// 0`). The bucket count then falls out as `subtrack_periods / this`, so the
@@ -269,6 +281,14 @@ pub fn analyze_subtrack(
     let mut hann_cache: std::collections::HashMap<usize, (Vec<f32>, f32)> =
         std::collections::HashMap::new();
 
+    // Pass 1 — raw single-bin DFT per (harmonic, bucket). No gating yet; we need
+    // the whole grid's peak before we can decide what counts as silence.
+    // `raw_phase` is in the synthesis (`sin`) convention: the DFT angle
+    // `atan2(im, re)` is the phase of a *cosine* at that bin while resynthesis
+    // renders `sin`, so we add π/2 — a source `A·sin(w·n + ψ)` reads as `ψ − π/2`.
+    let mut raw_amp = vec![vec![0.0f32; buckets]; num_harmonics];
+    let mut raw_phase = vec![vec![0.0f32; buckets]; num_harmonics]; // ψ (sin convention)
+    let mut global_max = 0.0f32;
     for (b, spec) in specs.iter().enumerate() {
         let win_len = spec.win_len.min(len);
         let (hann, wsum) = hann_cache.entry(win_len).or_insert_with(|| {
@@ -289,7 +309,7 @@ pub fn analyze_subtrack(
         for h in 0..num_harmonics {
             let f = (h + 1) as f32 * spec.local_freq;
             if f >= nyquist {
-                continue;
+                continue; // harmonic above Nyquist isn't in the source at all
             }
             let w = 2.0 * PI * f / sample_rate;
             let mut re = 0.0f32;
@@ -300,16 +320,42 @@ pub fn analyze_subtrack(
                 re += s * theta.cos();
                 im -= s * theta.sin();
             }
-            let amp = 2.0 / *wsum * (re * re + im * im).sqrt();
-            if amp < AMP_FLOOR {
-                continue; // leave amplitude/phase at 0 → no phase noise
+            let amp = (2.0 / *wsum * (re * re + im * im).sqrt()).min(1.0);
+            raw_amp[h][b] = amp;
+            raw_phase[h][b] = im.atan2(re) + 0.5 * PI;
+            if amp > global_max {
+                global_max = amp;
             }
-            amplitude[h][b] = amp.min(1.0);
-            let mut ph = im.atan2(re);
-            if ph < 0.0 {
-                ph += 2.0 * PI;
+        }
+    }
+
+    // Grid-relative amplitude gate: quiet but real sustained harmonics survive,
+    // near-silent buckets stay zeroed. (Absolute fallback for pure noise/DC.)
+    let amp_floor = (AMP_FLOOR_REL * global_max).max(AMP_FLOOR_ABS);
+
+    // Pass 2 — gate and store. Phase is kept *relative to the fundamental*
+    // (`ψ_k − k·ψ_1`): the raw DFT phase is tied to the absolute source sample
+    // index, so it differs per bucket and — since resynthesis restarts each
+    // bucket at t=0 — would make consecutive buckets start incoherently and
+    // smear into noise. The relative phase describes the waveform *shape* only,
+    // which is position-independent and stays continuous across buckets. A
+    // harmonic too weak within its bucket (or sitting on a silent fundamental)
+    // gets phase 0 (cosine-aligned, continuous) rather than a noisy one.
+    for b in 0..buckets {
+        let bucket_max = (0..num_harmonics).fold(0.0f32, |m, h| m.max(raw_amp[h][b]));
+        let phase_gate = PHASE_REL * bucket_max;
+        let fund = raw_phase[0][b];
+        let fund_voiced = raw_amp[0][b] >= amp_floor;
+        for h in 0..num_harmonics {
+            let a = raw_amp[h][b];
+            if a < amp_floor {
+                continue; // leave amplitude/phase at 0
             }
-            phase[h][b] = ph;
+            amplitude[h][b] = a;
+            if fund_voiced && a >= phase_gate {
+                let k = (h + 1) as f32;
+                phase[h][b] = (raw_phase[h][b] - k * fund).rem_euclid(2.0 * PI);
+            }
         }
     }
 
@@ -374,6 +420,85 @@ mod tests {
         // Harmonics above the 3rd are silent → phase left at 0 (no noise).
         assert!(res.amplitude[5][mid] < 0.02);
         assert_eq!(res.phase[5][mid], 0.0);
+    }
+
+    #[test]
+    fn phase_is_recovered_relative_to_fundamental() {
+        // x = sin(w n + 0.3) + 0.5·sin(2w n + 1.1). Phases are stored in the
+        // synthesis (sin) convention, relative to the fundamental, so:
+        //   H1 → 0 (fundamental is the reference)
+        //   H2 → ψ_2 − 2·ψ_1 = 1.1 − 2·0.3 = 0.5
+        let sr = 44_100.0;
+        let f = 440.0;
+        let w = 2.0 * PI * f / sr;
+        let n = sr as usize / 2;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let x = w * i as f32;
+                (x + 0.3).sin() + 0.5 * (2.0 * x + 1.1).sin()
+            })
+            .collect();
+
+        let res = analyze_subtrack(&samples, sr, f, &[], 0, 8, 2000);
+        let mid = res.num_buckets() / 2;
+
+        let dist = |a: f32, b: f32| {
+            let d = (a - b).rem_euclid(2.0 * PI);
+            d.min(2.0 * PI - d)
+        };
+        assert!(
+            dist(res.phase[0][mid], 0.0) < 0.05,
+            "H1 phase should be ~0 (fundamental reference), got {}",
+            res.phase[0][mid]
+        );
+        assert!(
+            dist(res.phase[1][mid], 0.5) < 0.05,
+            "H2 relative phase should be ~0.5, got {}",
+            res.phase[1][mid]
+        );
+    }
+
+    #[test]
+    fn relative_phase_is_stable_across_buckets() {
+        // A steady multi-harmonic tone: the stored phase describes the waveform
+        // shape, so it must be ~constant across buckets — no per-bucket jumps
+        // (those are what smear resynthesis into noise).
+        let sr = 44_100.0;
+        let f = 587.33; // ~D5
+        let w = 2.0 * PI * f / sr;
+        let n = sr as usize; // 1 s
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let x = w * i as f32;
+                (x + 0.7).sin() + 0.4 * (2.0 * x + 2.0).sin() + 0.2 * (3.0 * x + 1.0).sin()
+            })
+            .collect();
+
+        let res = analyze_subtrack(&samples, sr, f, &[], 0, 8, 2000);
+        let buckets = res.num_buckets();
+        assert!(buckets > 8);
+
+        let dist = |a: f32, b: f32| {
+            let d = (a - b).rem_euclid(2.0 * PI);
+            d.min(2.0 * PI - d)
+        };
+        // Compare interior buckets (skip the clamped first/last windows) for H2/H3.
+        for h in [1usize, 2] {
+            let ref_ph = res.phase[h][buckets / 2];
+            for b in 2..buckets - 2 {
+                if res.amplitude[h][b] <= 0.0 {
+                    continue;
+                }
+                assert!(
+                    dist(res.phase[h][b], ref_ph) < 0.2,
+                    "H{} phase jumped at bucket {}: {} vs {}",
+                    h + 1,
+                    b,
+                    res.phase[h][b],
+                    ref_ph
+                );
+            }
+        }
     }
 
     #[test]

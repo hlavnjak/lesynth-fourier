@@ -15,7 +15,11 @@
 use std::f32::consts::PI;
 
 // Audio Constants
-pub const NUM_HARMONICS: usize = 64;
+// 256 harmonics fully cover (below the 44.1 kHz Nyquist) every key whose
+// fundamental is ≥ ~86 Hz (down to ~E2); above that range `max_harmonic_for_key`
+// caps per key anyway. Shared by both Synth and Analysis modes (the per-harmonic
+// param array, the engine's amp/phase grid, and `analyze_and_load`).
+pub const NUM_HARMONICS: usize = 256;
 pub const NUM_KEYS: usize = 88;
 
 // Parameter Defaults and Ranges
@@ -63,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_audio_constants() {
-        assert_eq!(NUM_HARMONICS, 64);
+        assert_eq!(NUM_HARMONICS, 256);
         assert_eq!(NUM_KEYS, 88);
     }
 
