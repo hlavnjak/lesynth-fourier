@@ -422,15 +422,25 @@ impl Plugin for LeSynth {
                             });
                         } else {
                             // Analysis mode: per-harmonic enable/disable grid.
-                            egui::Frame::new()
-                                .fill(egui::Color32::from_rgb(18, 25, 45))
-                                .inner_margin(egui::Margin::same(6i8))
+                            // Reuse the exact same fixed-height scroll area as Synth
+                            // mode so the control box occupies identical space and the
+                            // keyboard + charts below line up in both modes.
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false; 2])
+                                .max_height(window_height * 0.40)
+                                .max_width(window_width)
                                 .show(ui, |ui| {
-                                    draw_analysis_controls(
-                                        ui,
-                                        &synth_compute_engine,
-                                        window_width - 12.0,
-                                    );
+                                    egui::Frame::new()
+                                        .fill(egui::Color32::from_rgb(18, 25, 45))
+                                        .inner_margin(egui::Margin::same(6i8))
+                                        .show(ui, |ui| {
+                                            draw_analysis_controls(
+                                                ui,
+                                                &synth_compute_engine,
+                                                window_width - 12.0,
+                                                window_height,
+                                            );
+                                        });
                                 });
                         }
 

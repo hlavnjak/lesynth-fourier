@@ -26,6 +26,7 @@ pub fn draw_analysis_controls(
     ui: &mut egui::Ui,
     engine: &Arc<SynthComputeEngine>,
     window_width: f32,
+    window_height: f32,
 ) {
     let shared = &engine.shared_params;
 
@@ -58,10 +59,17 @@ pub fn draw_analysis_controls(
     let mut amp_custom = shared.harmonic_ampl_custom.lock().unwrap().clone();
     let mut phase_custom = shared.harmonic_phase_custom.lock().unwrap().clone();
 
+    // Size the toggle grid so the whole control box fills the same
+    // window_height * 0.40 region the Synth-mode control box occupies. The
+    // header/description labels and the Enable/Disable buttons take a roughly
+    // fixed amount of chrome above and below the grid; reserve for it so the
+    // analysis box matches the Synth box height (and keyboard/charts align).
+    const CHROME: f32 = 115.0;
+    let grid_height = (window_height * 0.40 - CHROME).max(140.0);
     egui::ScrollArea::vertical()
         .id_salt("analysis_harmonic_toggles")
         .auto_shrink([false; 2])
-        .max_height(220.0)
+        .max_height(grid_height)
         .show(ui, |ui| {
             // Lay the harmonics out in columns. Each entry now carries four
             // toggles (amp / amp-custom / phase / phase-custom), so widen them.
