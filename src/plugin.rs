@@ -304,12 +304,43 @@ impl Plugin for LeSynth {
 
                         // Keep original structure but make it responsive
                         if mode == ExecutionMode::Synth {
+                        // The harmonic list is NUM_HARMONICS (256) rows, each a heavy
+                        // block of sliders/combos/nested-Fourier controls. egui is
+                        // immediate-mode and baseview re-runs this whole closure ~66x/sec,
+                        // so building all 256 rows every frame pegs a CPU core even when
+                        // the editor is idle. Virtualize with `show_rows` so only the rows
+                        // scrolled into view are built. The rows are uniform height: learn
+                        // it at runtime from the per-row stride and cache it in egui memory
+                        // (converges after one frame; never changes afterwards).
+                        let row_h_id = egui::Id::new("harmonic_row_height");
+                        let cached_row_h: f32 = egui_ctx
+                            .memory(|m| m.data.get_temp(row_h_id))
+                            .unwrap_or(500.0);
+                        let mut measured_row_h: Option<f32> = None;
+                        let mut prev_row_y: Option<f32> = None;
+
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
                             .max_height(window_height * 0.40)
                             .max_width(window_width)
-                            .show(ui, |ui| {
-                                for (idx, harmonic) in synth_params.harmonics.iter().enumerate() {
+                            .show_rows(
+                                ui,
+                                cached_row_h,
+                                synth_params.harmonics.len(),
+                                |ui, row_range| {
+                                let spacing_y = ui.spacing().item_spacing.y;
+                                for idx in row_range {
+                                    let harmonic = &synth_params.harmonics[idx];
+
+                                    // Learn the true (uniform) row height from the vertical
+                                    // stride between consecutive rows, minus the inter-row
+                                    // spacing egui inserts.
+                                    let row_y = ui.cursor().min.y;
+                                    if let (Some(p), None) = (prev_row_y, measured_row_h) {
+                                        measured_row_h = Some((row_y - p - spacing_y).max(1.0));
+                                    }
+                                    prev_row_y = Some(row_y);
+
                                     // ── Harmonic header ───────────────────────────────────────
                                     egui::Frame::new()
                                         .fill(egui::Color32::from_gray(58))
@@ -419,7 +450,17 @@ impl Plugin for LeSynth {
 
                                     ui.add_space(4.0);
                                 }
-                            });
+                                },
+                            );
+
+                        // Persist the measured row height so the next frame's
+                        // virtualization math is exact.
+                        if let Some(h) = measured_row_h {
+                            if (h - cached_row_h).abs() > 0.5 {
+                                egui_ctx.memory_mut(|m| m.data.insert_temp(row_h_id, h));
+                                egui_ctx.request_repaint();
+                            }
+                        }
                         } else {
                             // Analysis mode: per-harmonic enable/disable grid.
                             // Reuse the exact same fixed-height scroll area as Synth
