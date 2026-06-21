@@ -23,8 +23,7 @@ pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engi
         .should_reset_chart_view
         .load(std::sync::atomic::Ordering::Relaxed);
     let chart_width = window_width - 10.0;
-    //TODO replace with coeficient*window_height
-    let chart_height = window_height * 0.25;
+    let chart_height = window_height * 0.20;
 
     Plot::new("Assembled Sound Plot")
         .height(chart_height.max(100.0))

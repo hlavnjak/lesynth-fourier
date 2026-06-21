@@ -306,7 +306,7 @@ impl Plugin for LeSynth {
                         if mode == ExecutionMode::Synth {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
-                            .max_height(window_height * 0.48)
+                            .max_height(window_height * 0.40)
                             .max_width(window_width)
                             .show(ui, |ui| {
                                 for (idx, harmonic) in synth_params.harmonics.iter().enumerate() {
@@ -452,10 +452,14 @@ impl Plugin for LeSynth {
                             1.0,
                         );
 
-
+                        ui.add_space(30.0);
                         let chart_w = (window_width - gutter) * 0.5;
-                        let chart_h = (window_height * 0.20).max(200.0);
-                        let plot_start_point = egui::pos2(0.0, 0.62 * window_height);
+                        let chart_h = (window_height * 0.23).max(160.0);
+                        // Anchor the harmonic plots to the live flow cursor instead of a
+                        // hardcoded 0.62*window_height. The absolute rects below must line
+                        // up with the space reserved by allocate_space() so the assembled
+                        // chart that follows in flow doesn't overlap them.
+                        let plot_start_point = egui::pos2(0.0, ui.cursor().min.y);
                         let right_w = chart_w - gutter;
 
                         let left_rect = egui::Rect::from_min_size(
