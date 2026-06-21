@@ -43,9 +43,17 @@ pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engi
                 .lock()
                 .unwrap();
 
+            // Decimate to a bounded number of points: the synth-mode preview
+            // buffer is `num_buckets * period` samples (tens of thousands), and
+            // rebuilding/redrawing a line for every sample each frame tanks the
+            // frame rate as the bucket count grows. Striding keeps the plot cheap
+            // and visually identical at this chart size.
+            const MAX_PLOT_POINTS: usize = 2000;
+            let stride = (assembled.len() / MAX_PLOT_POINTS).max(1);
             let points: PlotPoints = assembled
                 .iter()
                 .enumerate()
+                .step_by(stride)
                 .map(|(i, &sample)| [i as f64, sample as f64])
                 .collect();
 
