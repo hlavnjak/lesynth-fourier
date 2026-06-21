@@ -32,6 +32,11 @@ pub fn draw_analysis_controls(
 
     let num_harmonics = shared.amplitude_data.lock().unwrap().len();
 
+    // Whether analysis data has actually been loaded. When the plugin is opened
+    // in plain Synth mode (no subtrack analysed) there is no analysed curve to
+    // override, so the per-harmonic "cust" checkboxes are disabled.
+    let has_analysis = *shared.analysis_duration_secs.lock().unwrap() > 0.0;
+
     ui.label(
         RichText::new("Analysis mode — toggle individual harmonics")
             .strong()
@@ -66,7 +71,7 @@ pub fn draw_analysis_controls(
     // analysis box matches the Synth box height (and keyboard/charts align).
     const CHROME: f32 = 115.0;
     let grid_height = (window_height * 0.40 - CHROME).max(140.0);
-    egui::ScrollArea::vertical()
+    egui::ScrollArea::both()
         .id_salt("analysis_harmonic_toggles")
         .auto_shrink([false; 2])
         .max_height(grid_height)
@@ -97,11 +102,16 @@ pub fn draw_analysis_controls(
                                     changed = true;
                                 }
                                 if ui
-                                    .checkbox(&mut amp_custom[n], "cust")
-                                    .on_hover_text(
-                                        "Override the analysed amplitude curve with your \
-                                         Synth-mode curve (Constant / Nested Fourier)",
+                                    .add_enabled(
+                                        has_analysis,
+                                        egui::Checkbox::new(&mut amp_custom[n], "cust"),
                                     )
+                                    .on_hover_text(if has_analysis {
+                                        "Override the analysed amplitude curve with your \
+                                         Synth-mode curve (Constant / Nested Fourier)"
+                                    } else {
+                                        "No analysed audio loaded — nothing to override"
+                                    })
                                     .changed()
                                 {
                                     engine.set_harmonic_custom(n, ChartType::Amp, amp_custom[n]);
@@ -114,11 +124,16 @@ pub fn draw_analysis_controls(
                                     changed = true;
                                 }
                                 if ui
-                                    .checkbox(&mut phase_custom[n], "cust")
-                                    .on_hover_text(
-                                        "Override the analysed phase curve with your \
-                                         Synth-mode curve (Constant / Nested Fourier)",
+                                    .add_enabled(
+                                        has_analysis,
+                                        egui::Checkbox::new(&mut phase_custom[n], "cust"),
                                     )
+                                    .on_hover_text(if has_analysis {
+                                        "Override the analysed phase curve with your \
+                                         Synth-mode curve (Constant / Nested Fourier)"
+                                    } else {
+                                        "No analysed audio loaded — nothing to override"
+                                    })
                                     .changed()
                                 {
                                     engine.set_harmonic_custom(
@@ -130,7 +145,9 @@ pub fn draw_analysis_controls(
                             });
                         }
                     });
-                    ui.add_space(8.0);
+                    // Wide gutter between columns so the last "cust" checkbox of
+                    // one column is clearly separated from the next column's "H" label.
+                    ui.add_space(28.0);
                 }
             });
         });
