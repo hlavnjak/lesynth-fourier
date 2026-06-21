@@ -825,6 +825,9 @@ impl SynthComputeEngine {
             0.0
         };
         *self.shared_params.analysis_duration_secs.lock().unwrap() = duration_secs;
+        // Remember the source fundamental so the GUI can report the original
+        // tone's absolute min/max pitch (base_freq * per-bucket pitch ratio).
+        *self.shared_params.analysis_base_freq.lock().unwrap() = base_freq.max(0.0);
         self.shared_params
             .set_execution_mode(super::ExecutionMode::Analysis);
         self.load_analysis(&result);

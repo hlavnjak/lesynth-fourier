@@ -52,6 +52,29 @@ pub fn draw_analysis_controls(
         .size(11.0)
         .color(Color32::from_gray(190)),
     );
+
+    // Report the original tone's pitch range (absolute Hz = base_freq * the
+    // per-bucket pitch ratio). Only shown when analysis data is actually loaded.
+    if has_analysis {
+        let base_freq = *shared.analysis_base_freq.lock().unwrap();
+        let ratios = shared.bucket_pitch_ratio.lock().unwrap();
+        if base_freq > 0.0 && !ratios.is_empty() {
+            let min_ratio = ratios.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max_ratio = ratios.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let min_pitch = base_freq * min_ratio;
+            let max_pitch = base_freq * max_ratio;
+            ui.label(
+                RichText::new(format!(
+                    "Original tone pitch: min {:.1} Hz  ·  max {:.1} Hz",
+                    min_pitch, max_pitch
+                ))
+                .size(12.0)
+                .strong()
+                .color(Color32::from_rgb(160, 235, 170)),
+            );
+        }
+    }
+
     ui.add_space(4.0);
 
     let mut changed = false;

@@ -44,6 +44,11 @@ pub struct SharedParams {
     /// across `analysis_duration_secs * sample_rate` samples regardless of key.
     /// `0.0` means "no analysis loaded" → fall back to one period per bucket.
     pub analysis_duration_secs: Arc<Mutex<f32>>,
+    /// Median fundamental (Hz) of the most recently analysed subtrack. Combined
+    /// with [`Self::bucket_pitch_ratio`] (`f_local / base_freq`) it yields the
+    /// absolute per-bucket pitch, so the GUI can report the original tone's
+    /// min/max pitch. `0.0` means "no analysis loaded".
+    pub analysis_base_freq: Arc<Mutex<f32>>,
     pub voices: Arc<Mutex<Vec<Option<Voice>>>>,
     pub assembled_sound_plotted: Arc<Mutex<Vec<f32>>>,
     pub piano_periods: Arc<Mutex<Vec<u32>>>,
@@ -88,6 +93,7 @@ impl SharedParams {
             bucket_pitch_ratio: Arc::new(Mutex::new(vec![1.0; buckets])),
             sample_rate: Arc::new(Mutex::new(44100.0)),
             analysis_duration_secs: Arc::new(Mutex::new(0.0)),
+            analysis_base_freq: Arc::new(Mutex::new(0.0)),
             voices: Arc::new(Mutex::new(vec![None; NUM_KEYS])),
             assembled_sound_plotted: Arc::new(Mutex::new(Vec::new())),
             piano_periods: Arc::new(Mutex::new(Self::populate_piano_periods())),
