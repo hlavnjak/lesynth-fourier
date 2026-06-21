@@ -70,6 +70,16 @@ impl Default for LeSynthParams {
         let harmonics: Vec<HarmonicParam> = (0..NUM_HARMONICS).map(|i| {
             let idx = i + 1;
             let amp = if idx > 10 { 0.05 } else { default_amp };
+            // Default offset granularity (amplitude-slider cap) by harmonic index:
+            // lower harmonics carry the most energy so they default coarser.
+            // Harmonics 1-8 → 0.5, 9-28 → 0.1, 29+ → 0.05.
+            let default_gran = if i < 8 {
+                GranularityLevel::Medium
+            } else if i < 28 {
+                GranularityLevel::Low
+            } else {
+                GranularityLevel::VeryLow
+            };
             HarmonicParam {
                 curve_offset_amp: FloatParam::new(
                     &format!("Harmonic {} Curve Offset For Amplitude", idx),
@@ -111,11 +121,11 @@ impl Default for LeSynthParams {
                 ),
                 granularity_amp: EnumParam::new(
                     &format!("Harmonic {} Granularity For Amplitude", idx),
-                    GranularityLevel::default(),
+                    default_gran,
                 ),
                 granularity_phase: EnumParam::new(
                     &format!("Harmonic {} Granularity For Phase", idx),
-                    GranularityLevel::default(),
+                    default_gran,
                 ),
                 wobble_amp_amp: FloatParam::new(
                     &format!("Harmonic {} Wobble Amplitude For Amplitude", idx),

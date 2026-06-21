@@ -27,6 +27,20 @@ fn gran_label(g: GranularityLevel) -> &'static str {
     }
 }
 
+/// Default granularity (amplitude-slider max) for a sub-harmonic by index:
+/// lower harmonics carry the most energy, so they get a coarser cap while the
+/// higher ones default progressively finer. First 8 → 0.5, next 20 → 0.1,
+/// the rest → 0.05.
+fn default_granularity(sub_idx: usize) -> GranularityLevel {
+    if sub_idx < 8 {
+        GranularityLevel::Medium
+    } else if sub_idx < 28 {
+        GranularityLevel::Low
+    } else {
+        GranularityLevel::VeryLow
+    }
+}
+
 pub fn draw_nested_fourier_controls(
     ui: &mut nih_plug_egui::egui::Ui,
     harmonic_idx: usize,
@@ -66,7 +80,7 @@ pub fn draw_nested_fourier_controls(
             // resets when the editor is reopened. The slider VALUE persists normally.
             let gran_id = egui::Id::new(("nf_gran", chart_type, harmonic_idx, sub_idx));
             let mut gran: GranularityLevel =
-                ui.data_mut(|d| d.get_temp(gran_id)).unwrap_or(GranularityLevel::High);
+                ui.data_mut(|d| d.get_temp(gran_id)).unwrap_or_else(|| default_granularity(sub_idx));
             let gran_max = gran.as_f64();
 
             ui.vertical(|ui| {
