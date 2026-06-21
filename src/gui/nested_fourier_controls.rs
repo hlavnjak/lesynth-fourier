@@ -110,6 +110,9 @@ pub fn draw_nested_fourier_controls(
                     nf.write().unwrap().series_mut(chart_type).amps[sub_idx] = amp_val as f32;
                 }
 
+                // Breathing room between the amp slider and the granularity box.
+                ui.add_space(8.0);
+
                 // Per-slider granularity selector (sets this slider's amplitude max).
                 {
                     let style = ui.style_mut();
@@ -151,6 +154,9 @@ pub fn draw_nested_fourier_controls(
                             }
                         }
                     });
+
+                // Breathing room between the granularity box and the phase slider.
+                ui.add_space(8.0);
 
                 // Phase slider (horizontal)
                 {
