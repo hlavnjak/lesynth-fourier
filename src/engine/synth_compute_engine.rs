@@ -294,6 +294,17 @@ impl SynthComputeEngine {
     /// skipping the "bucket 0 already matches" early-out. Needed when overwriting
     /// an analysed row (where only bucket 0 might coincide with `value`).
     fn fill_constant_curve_forced(&self, n: usize, value: f32, chart_type: ChartType) {
+        self.write_constant_row(n, value, chart_type);
+        self.set_normalization_needed(true);
+        self.shared_params.mark_all_buffers_dirty();
+        // Update assembled chart with key 24 for immediate preview
+        self.update_assembled_chart_with_key24();
+    }
+
+    /// Write harmonic `n`'s constant-curve amplitude/phase row, without the
+    /// normalize/dirty/chart side effects. Used both by the public fill (which
+    /// adds those) and by bulk operations that batch the side effects once.
+    fn write_constant_row(&self, n: usize, value: f32, chart_type: ChartType) {
         let wobble_amp = match chart_type {
             ChartType::Amp => self.synth_params.harmonics[n].wobble_amp_amp.value(),
             ChartType::Phase => self.synth_params.harmonics[n].wobble_amp_phase.value(),
@@ -320,12 +331,6 @@ impl SynthComputeEngine {
             };
             data[n][bucket] = final_value;
         }
-        self.set_normalization_needed(true);
-        // Mark all buffers as dirty since harmonic parameters changed
-        drop(data); // Release the lock before calling mark_all_buffers_dirty
-        self.shared_params.mark_all_buffers_dirty();
-        // Update assembled chart with key 24 for immediate preview
-        self.update_assembled_chart_with_key24();
     }
 
     pub fn fill_sin_curve(&self, n: usize, chart_type: ChartType) {
@@ -380,6 +385,15 @@ impl SynthComputeEngine {
     /// The amplitude chart clamps the result to [0, 1]; the phase chart leaves it unclamped.
     /// Each chart uses its own independent set of sub-harmonic parameters.
     pub fn fill_nested_fourier_curve(&self, n: usize, chart_type: ChartType) {
+        self.write_nested_fourier_row(n, chart_type);
+        self.set_normalization_needed(true);
+        self.shared_params.mark_all_buffers_dirty();
+        self.update_assembled_chart_with_key24();
+    }
+
+    /// Write harmonic `n`'s nested-Fourier amplitude/phase row, without the
+    /// normalize/dirty/chart side effects (see [`Self::write_constant_row`]).
+    fn write_nested_fourier_row(&self, n: usize, chart_type: ChartType) {
         let harmonic = &self.synth_params.harmonics[n];
         let offset = match chart_type {
             ChartType::Amp => harmonic.curve_offset_amp.value() as f64,
@@ -409,9 +423,94 @@ impl SynthComputeEngine {
                 ChartType::Phase => value as f32,
             };
         }
+    }
+
+    /// Refill harmonic `n`'s amplitude or phase row from its current Synth-mode
+    /// curve type (Constant or Nested Fourier), applying the normalize/dirty/
+    /// chart side effects. Used by the per-harmonic "custom" override.
+    fn refill_harmonic_curve(&self, n: usize, chart_type: ChartType) {
+        match self.curve_type_of(n, chart_type) {
+            CurveType::Constant => {
+                self.fill_constant_curve_forced(n, self.curve_offset_of(n, chart_type), chart_type);
+            }
+            CurveType::NestedFourier => self.fill_nested_fourier_curve(n, chart_type),
+        }
+    }
+
+    /// Like [`Self::refill_harmonic_curve`] but writes the row only — no
+    /// normalize/dirty/chart side effects. Used by bulk operations that batch
+    /// those once at the end.
+    fn refill_harmonic_curve_quiet(&self, n: usize, chart_type: ChartType) {
+        match self.curve_type_of(n, chart_type) {
+            CurveType::Constant => {
+                self.write_constant_row(n, self.curve_offset_of(n, chart_type), chart_type);
+            }
+            CurveType::NestedFourier => self.write_nested_fourier_row(n, chart_type),
+        }
+    }
+
+    fn curve_type_of(&self, n: usize, chart_type: ChartType) -> CurveType {
+        match chart_type {
+            ChartType::Amp => self.synth_params.harmonics[n].curve_type_amp.value(),
+            ChartType::Phase => self.synth_params.harmonics[n].curve_type_phase.value(),
+        }
+    }
+
+    fn curve_offset_of(&self, n: usize, chart_type: ChartType) -> f32 {
+        match chart_type {
+            ChartType::Amp => self.synth_params.harmonics[n].curve_offset_amp.value(),
+            ChartType::Phase => self.synth_params.harmonics[n].curve_offset_phase.value(),
+        }
+    }
+
+    /// Current number of buckets (time-resolution of the synthesised envelope).
+    pub fn num_buckets(&self) -> usize {
+        self.shared_params
+            .amplitude_data
+            .lock()
+            .unwrap()
+            .first()
+            .map(|r| r.len())
+            .unwrap_or(0)
+    }
+
+    /// Resize the per-bucket synthesis grid to `new_buckets` and refill every
+    /// harmonic's curve. This is the time-resolution of the synthesised
+    /// envelope; only meaningful in Synth mode. Analysis mode derives its bucket
+    /// count from the analysed audio, so callers must not invoke this while
+    /// analysed data is loaded. No-op when the grid is already that size.
+    pub fn set_num_buckets(&self, new_buckets: usize) {
+        let new_buckets = new_buckets.max(1);
+        {
+            let mut amp = self.shared_params.amplitude_data.lock().unwrap();
+            if amp.first().map(|r| r.len()) == Some(new_buckets) {
+                return;
+            }
+            let mut phase = self.shared_params.phase_data.lock().unwrap();
+            let mut norm = self.shared_params.amplitude_data_normalized.lock().unwrap();
+            for row in amp.iter_mut() {
+                row.resize(new_buckets, 0.0);
+            }
+            for row in phase.iter_mut() {
+                row.resize(new_buckets, 0.0);
+            }
+            *norm = vec![vec![0.0; new_buckets]; amp.len()];
+        }
+        {
+            // Synth mode is flat (no vibrato); keep the ratio grid sized to match.
+            let mut ratio = self.shared_params.bucket_pitch_ratio.lock().unwrap();
+            ratio.resize(new_buckets, 1.0);
+        }
+
+        // Re-render every harmonic's amp & phase row onto the new grid, batching
+        // the (expensive) normalize/dirty/chart side effects to a single pass.
+        let n_harm = self.synth_params.harmonics.len();
+        for n in 0..n_harm {
+            self.refill_harmonic_curve_quiet(n, ChartType::Amp);
+            self.refill_harmonic_curve_quiet(n, ChartType::Phase);
+        }
 
         self.set_normalization_needed(true);
-        drop(data);
         self.shared_params.mark_all_buffers_dirty();
         self.update_assembled_chart_with_key24();
     }
@@ -853,20 +952,7 @@ impl SynthComputeEngine {
         }
 
         if custom {
-            let curve_type = match chart_type {
-                ChartType::Amp => self.synth_params.harmonics[n].curve_type_amp.value(),
-                ChartType::Phase => self.synth_params.harmonics[n].curve_type_phase.value(),
-            };
-            match curve_type {
-                CurveType::Constant => {
-                    let offset = match chart_type {
-                        ChartType::Amp => self.synth_params.harmonics[n].curve_offset_amp.value(),
-                        ChartType::Phase => self.synth_params.harmonics[n].curve_offset_phase.value(),
-                    };
-                    self.fill_constant_curve_forced(n, offset, chart_type);
-                }
-                CurveType::NestedFourier => self.fill_nested_fourier_curve(n, chart_type),
-            }
+            self.refill_harmonic_curve(n, chart_type);
         } else {
             {
                 let snapshot = match chart_type {
