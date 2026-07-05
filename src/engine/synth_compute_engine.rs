@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
+use realfft::num_complex::Complex;
+use realfft::{ComplexToReal, RealFftPlanner};
 use crate::constants::{NUM_HARMONICS, NUM_OF_BUCKETS_DEFAULT, TWO_PI, NUM_KEYS, max_harmonic_for_key};
 use crate::params::{CurveType, LeSynthParams};
 use super::{ChartType, ExecutionMode, SharedParams};
@@ -37,6 +40,92 @@ fn bucket_pitch_ratios(shared_params: &SharedParams) -> Vec<f32> {
 fn bucket_period(base_period: usize, ratios: &[f32], bucket: usize) -> usize {
     let r = ratios.get(bucket).copied().unwrap_or(1.0);
     ((base_period as f32 / r.max(1e-3)).round() as usize).max(2)
+}
+
+/// Above this many active harmonics in a bucket, resynthesis switches from the
+/// direct sinusoid sum (`O(period · harmonics)`) to a single inverse real-FFT
+/// (`O(period · log period)`). Below it the direct loop wins — the FFT's setup
+/// and transform overhead isn't worth it for a handful of harmonics (and matches
+/// the "> 10 harmonics ⇒ FFT" rule of thumb). The two paths are numerically
+/// equivalent, so this only trades speed, never the produced audio.
+const IFFT_MIN_HARMONICS: usize = 10;
+
+/// Reusable inverse-FFT resources for the resynthesis fast path. One instance is
+/// built per [`render_key_buffer`] call and shared across all of that key's
+/// buckets; plans are cached by length, so Synth mode (every bucket one shared
+/// period) plans once and Analysis mode only spans the handful of distinct
+/// periods its vibrato produces.
+struct IfftBank {
+    planner: RealFftPlanner<f32>,
+    plans: HashMap<usize, Arc<dyn ComplexToReal<f32>>>,
+}
+
+impl IfftBank {
+    fn new() -> Self {
+        Self { planner: RealFftPlanner::new(), plans: HashMap::new() }
+    }
+
+    fn plan(&mut self, len: usize) -> Arc<dyn ComplexToReal<f32>> {
+        let planner = &mut self.planner;
+        self.plans
+            .entry(len)
+            .or_insert_with(|| planner.plan_fft_inverse(len))
+            .clone()
+    }
+}
+
+/// Render one bucket — exactly `period` samples, one fundamental cycle — via a
+/// single inverse real-FFT instead of the direct sinusoid sum, appending the
+/// (clamped) samples to `sound`.
+///
+/// Harmonic `n` occupies FFT bin `k = n + 1` (it completes `k` cycles in
+/// `period` samples). A real sine `A·sin(2π k t/period + φ)` corresponds to the
+/// half-spectrum coefficient `(A/2)·e^{i(φ − π/2)} = (A/2)(sin φ − i cos φ)`; at
+/// an exact Nyquist bin (`k == period/2`, even period) the bin is not mirrored,
+/// so it takes the real coefficient `A·sin φ` (there `sin(π t + φ) = (−1)^t sin φ`).
+/// The result is the same sum the direct path builds, and the summed sample is
+/// clamped to [-1, 1] afterwards exactly as before.
+fn render_bucket_ifft(
+    bank: &mut IfftBank,
+    sound: &mut Vec<f32>,
+    ampl: &[Vec<f32>],
+    phase: &[Vec<f32>],
+    ampl_enabled: &[bool],
+    phase_enabled: &[bool],
+    bucket: usize,
+    period: usize,
+    max_h: usize,
+) {
+    let fft = bank.plan(period);
+    let mut spectrum = fft.make_input_vec(); // length period/2 + 1, zero-filled
+    let nyq = period / 2; // highest representable bin (real if `period` even)
+    for n in 0..max_h {
+        if !ampl_enabled[n] {
+            continue;
+        }
+        let amp = ampl[n][bucket];
+        if amp == 0.0 {
+            continue;
+        }
+        let k = n + 1;
+        if k > nyq {
+            break; // above the FFT's range; guarded by max_h ≤ period/2, kept for safety
+        }
+        let ph = if phase_enabled[n] { phase[n][bucket] } else { 0.0 };
+        spectrum[k] = if k == nyq && period % 2 == 0 {
+            Complex { re: amp * ph.sin(), im: 0.0 }
+        } else {
+            Complex { re: 0.5 * amp * ph.sin(), im: -0.5 * amp * ph.cos() }
+        };
+    }
+    let mut out = fft.make_output_vec(); // length == period
+    // Invariants hold by construction: `spectrum` is the exact input length and
+    // its DC (bin 0) and Nyquist imaginary parts are zero.
+    fft.process(&mut spectrum, &mut out)
+        .expect("irfft input length and DC/Nyquist invariants hold");
+    for s in out {
+        sound.push(s.clamp(-1.0, 1.0));
+    }
 }
 
 /// Render a key's waveform from an amp/phase grid. This is the single render
@@ -80,6 +169,7 @@ fn render_key_buffer(
     let mut produced = 0usize;
     let mut chunk = 0usize;
     let mut last_yield = 0usize;
+    let mut ifft_bank = IfftBank::new();
     loop {
         let bucket = if drive_by_time {
             if produced >= target_samples {
@@ -107,22 +197,38 @@ fn render_key_buffer(
 
         let period = bucket_period(base_period, ratios, bucket);
         let max_h = num_harmonics.min(max_harmonic).min(period / 2);
-        for t in 0..period {
-            let mut sample = 0.0;
-            for n in 0..max_h {
-                let amp = ampl[n][bucket];
-                if !ampl_enabled[n] || amp == 0.0 {
-                    continue;
+        if max_h > IFFT_MIN_HARMONICS {
+            // Fast path: one inverse real-FFT for the whole bucket.
+            render_bucket_ifft(
+                &mut ifft_bank,
+                &mut sound,
+                ampl,
+                phase,
+                ampl_enabled,
+                phase_enabled,
+                bucket,
+                period,
+                max_h,
+            );
+        } else {
+            // Direct sinusoid sum — cheaper than an FFT for few harmonics.
+            for t in 0..period {
+                let mut sample = 0.0;
+                for n in 0..max_h {
+                    let amp = ampl[n][bucket];
+                    if !ampl_enabled[n] || amp == 0.0 {
+                        continue;
+                    }
+                    let ph = if phase_enabled[n] {
+                        phase[n][bucket]
+                    } else {
+                        0.0
+                    };
+                    sample += amp
+                        * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + ph).sin();
                 }
-                let ph = if phase_enabled[n] {
-                    phase[n][bucket]
-                } else {
-                    0.0
-                };
-                sample += amp
-                    * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + ph).sin();
+                sound.push(sample.clamp(-1.0, 1.0));
             }
-            sound.push(sample.clamp(-1.0, 1.0));
         }
         produced += period;
         chunk += 1;
@@ -1109,6 +1215,78 @@ mod tests {
         assert_eq!(len, buckets * base_period, "synth playback must ignore ratios");
     }
 
+
+    /// Direct sinusoid sum for a single bucket — the reference the IFFT path
+    /// must match. Mirrors the direct branch in `render_key_buffer`.
+    fn direct_bucket(
+        ampl: &[Vec<f32>],
+        phase: &[Vec<f32>],
+        ampl_enabled: &[bool],
+        phase_enabled: &[bool],
+        bucket: usize,
+        period: usize,
+        max_h: usize,
+    ) -> Vec<f32> {
+        (0..period)
+            .map(|t| {
+                let mut sample = 0.0f32;
+                for n in 0..max_h {
+                    let amp = ampl[n][bucket];
+                    if !ampl_enabled[n] || amp == 0.0 {
+                        continue;
+                    }
+                    let ph = if phase_enabled[n] { phase[n][bucket] } else { 0.0 };
+                    sample += amp
+                        * (TWO_PI * (n as f32 + 1.0) * (t as f32) / (period as f32) + ph).sin();
+                }
+                sample.clamp(-1.0, 1.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ifft_bucket_matches_direct_sum() {
+        // The IFFT resynthesis fast path must be numerically equivalent to the
+        // direct sinusoid sum for a variety of periods (even/odd, incl. an exact
+        // Nyquist harmonic) and mixed amp/phase/enable flags.
+        for &period in &[64usize, 65, 100, 128, 129, 512] {
+            let max_h = (period / 2).min(40).max(12); // exercise the IFFT branch
+            // Deterministic pseudo-random-ish grid, one bucket.
+            let mut ampl = vec![vec![0.0f32]; max_h];
+            let mut phase = vec![vec![0.0f32]; max_h];
+            let mut ampl_enabled = vec![true; max_h];
+            let mut phase_enabled = vec![true; max_h];
+            for n in 0..max_h {
+                ampl[n][0] = 0.02 * ((n * 7 % 11) as f32) + 0.01; // small, avoids clamping
+                phase[n][0] = (n as f32 * 1.3).sin() * std::f32::consts::PI;
+                if n % 5 == 0 {
+                    ampl_enabled[n] = false; // disabled harmonic contributes nothing
+                }
+                if n % 3 == 0 {
+                    phase_enabled[n] = false; // phase forced to 0
+                }
+            }
+
+            let want = direct_bucket(&ampl, &phase, &ampl_enabled, &phase_enabled, 0, period, max_h);
+
+            let mut bank = IfftBank::new();
+            let mut got = Vec::new();
+            render_bucket_ifft(
+                &mut bank, &mut got, &ampl, &phase, &ampl_enabled, &phase_enabled, 0, period, max_h,
+            );
+
+            assert_eq!(got.len(), period);
+            let max_err = want
+                .iter()
+                .zip(&got)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_err < 1e-4,
+                "IFFT diverged from direct sum (period {period}, max_h {max_h}): max_err {max_err}"
+            );
+        }
+    }
 
     #[test]
     fn bucket_period_scales_with_ratio() {
