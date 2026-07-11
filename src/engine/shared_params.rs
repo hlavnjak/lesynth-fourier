@@ -80,6 +80,9 @@ pub struct SharedParams {
 
     /// Synth (curve-driven) vs Analysis (audio-driven) execution mode.
     pub execution_mode: Arc<AtomicU8>,
+
+    /// When true a held note loops its buffer; when false it plays once.
+    pub repeat_playback: Arc<AtomicBool>,
 }
 
 impl SharedParams {
@@ -115,7 +118,20 @@ impl SharedParams {
             should_reset_chart_view: Arc::new(AtomicBool::new(false)),
 
             execution_mode: Arc::new(AtomicU8::new(ExecutionMode::Synth.as_u8())),
+
+            // Default to looping a held note, matching prior behaviour.
+            repeat_playback: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    /// Whether a held note loops its buffer (true) or plays once (false).
+    pub fn repeat_playback(&self) -> bool {
+        self.repeat_playback.load(Ordering::Relaxed)
+    }
+
+    /// Set whether a held note loops its buffer.
+    pub fn set_repeat_playback(&self, repeat: bool) {
+        self.repeat_playback.store(repeat, Ordering::Relaxed);
     }
 
     /// Current execution mode.

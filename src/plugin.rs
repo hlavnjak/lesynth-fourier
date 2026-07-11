@@ -89,6 +89,7 @@ impl Plugin for LeSynth {
     ) -> ProcessStatus {
         let shared = &self.synth_compute_engine.shared_params;
         let fade_duration = shared.fade_duration;
+        let repeat_playback = shared.repeat_playback();
 
         // --- Handle incoming MIDI events (build/stop voices) ---
         while let Some(event) = context.next_event() {
@@ -161,7 +162,20 @@ impl Plugin for LeSynth {
                             continue;
                         }
 
-                        let mut s = v.buffer[v.idx % len];
+                        // One-shot playback: once the whole buffer has played,
+                        // begin a clean fade-out (holding the last sample) rather
+                        // than looping. Repeat mode keeps wrapping as before.
+                        if !repeat_playback && v.idx >= len && !v.fade_out_active {
+                            v.fade_out_active = true;
+                            v.fade_out_pos = 0;
+                        }
+
+                        let sample_idx = if repeat_playback {
+                            v.idx % len
+                        } else {
+                            v.idx.min(len - 1)
+                        };
+                        let mut s = v.buffer[sample_idx];
 
                         // Apply per-voice scaling FIRST to prevent intermediate clipping
                         s *= voice_gain;

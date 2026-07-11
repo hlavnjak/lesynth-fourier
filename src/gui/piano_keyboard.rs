@@ -119,6 +119,12 @@ pub fn draw_piano_keyboard(
     ui.horizontal(|ui| {
         ui.add_space(10.0);
         ui.colored_label(status_color, &status_text);
+        ui.separator();
+        // Playback mode: loop a held note, or play it once.
+        let mut repeat = synth_compute_engine.shared_params.repeat_playback();
+        if ui.checkbox(&mut repeat, "Repeat").changed() {
+            synth_compute_engine.shared_params.set_repeat_playback(repeat);
+        }
     });
     ui.add_space(5.0);
 
