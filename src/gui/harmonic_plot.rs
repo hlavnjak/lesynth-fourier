@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use nih_plug_egui::egui::{Align2, Color32, RichText};
-use egui_plot::{Line, Plot, PlotPoints, Text};
-use crate::constants::{LABEL_FONT_SIZE, TWO_PI};
+use nih_plug_egui::egui::RichText;
+use egui_plot::{Line, Plot, PlotPoints};
+use crate::constants::TWO_PI;
 use crate::engine::{ChartType, SynthComputeEngine};
 
 pub fn draw_harmonic_plot(
@@ -90,19 +90,11 @@ pub fn draw_harmonic_plot(
                     .map(|(i, &val)| [i as f64, val as f64])
                     .collect();
 
-                if let Some(last_point) = points.points().last() {
-                    let text_widget = RichText::new(format!("H{}", n + 1))
-                        .size(LABEL_FONT_SIZE)
-                        .color(Color32::WHITE);
-
-                    plot_ui.text(
-                        Text::new(*last_point, text_widget)
-                            .color(Color32::WHITE)
-                            .anchor(Align2::LEFT_CENTER),
-                    );
-                }
-
-                plot_ui.line(Line::new(points).name(format!("Harmonic {}", n + 1)));
+                plot_ui.line(
+                    Line::new(points)
+                        .color(crate::gui::harmonic_color(n))
+                        .name(format!("Harmonic {}", n + 1)),
+                );
             }
         });
 }

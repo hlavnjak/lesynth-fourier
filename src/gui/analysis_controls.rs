@@ -112,11 +112,30 @@ pub fn draw_analysis_controls(
                                 break;
                             }
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!("H{:>2}", n + 1))
-                                        .monospace()
-                                        .color(Color32::WHITE),
+                                // Colour the "H" to match this harmonic's graph
+                                // line; keep the number white for readability.
+                                let font_id =
+                                    egui::TextStyle::Monospace.resolve(ui.style());
+                                let mut label = egui::text::LayoutJob::default();
+                                label.append(
+                                    "H",
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: font_id.clone(),
+                                        color: crate::gui::harmonic_color(n),
+                                        ..Default::default()
+                                    },
                                 );
+                                label.append(
+                                    &format!("{:>2}", n + 1),
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id,
+                                        color: Color32::WHITE,
+                                        ..Default::default()
+                                    },
+                                );
+                                ui.label(label);
                                 if ui
                                     .checkbox(&mut amp_enabled[n], "amp")
                                     .on_hover_text("Include this harmonic's amplitude")

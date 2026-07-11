@@ -35,9 +35,6 @@ pub static MAX_OFFSET_AMP: f64 = 1.0;
 pub static MIN_OFFSET_PHASE: f64 = 0.0;
 pub static MAX_OFFSET_PHASE: f64 = 6.28;
 
-// GUI Constants
-pub static LABEL_FONT_SIZE: f32 = 12.0;
-
 // Audio Processing Constants
 pub const TWO_PI: f32 = 2.0 * PI;
 pub const SAMPLE_RATE: f64 = 44100.0;
@@ -101,12 +98,6 @@ mod tests {
     fn test_two_pi_constant() {
         assert_eq!(TWO_PI, 2.0 * PI);
         assert!((TWO_PI - 6.28318530717959).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_gui_constants() {
-        assert_eq!(LABEL_FONT_SIZE, 12.0);
-        assert!(LABEL_FONT_SIZE > 0.0);
     }
 
     #[test]

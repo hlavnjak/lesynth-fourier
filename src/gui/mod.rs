@@ -30,6 +30,16 @@ pub use nested_fourier_controls::draw_nested_fourier_controls;
 
 use nih_plug_egui::egui;
 
+/// Deterministic display colour for harmonic `n`, shared between the harmonic
+/// plots and the Analysis-mode "H" labels so a given harmonic reads as the same
+/// colour everywhere. Golden-ratio hue spacing keeps adjacent harmonics well
+/// separated.
+pub fn harmonic_color(n: usize) -> egui::Color32 {
+    let golden_ratio = (5.0_f32.sqrt() - 1.0) / 2.0;
+    let hue = (n as f32 * golden_ratio).fract();
+    egui::Color32::from(egui::ecolor::Hsva::new(hue, 0.85, 0.85, 1.0))
+}
+
 /// Consistent bordered "section card" used to separate the top-level areas of
 /// the editor, mirroring the framed sections in the Gemstone DAW host UI: a
 /// rounded, bordered, dark-translucent card with an accent heading and a
