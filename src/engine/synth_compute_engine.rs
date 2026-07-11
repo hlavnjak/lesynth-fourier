@@ -35,6 +35,36 @@ fn bucket_pitch_ratios(shared_params: &SharedParams) -> Vec<f32> {
     }
 }
 
+/// Resample a per-bucket envelope row to `new_len` buckets by linear
+/// interpolation over the normalized position `t = bucket / len` (matching the
+/// `t = bucket / num_buckets` convention the curve fills use). Preserves the
+/// row's shape at a new time-resolution without regenerating it from params, so
+/// an all-zero (untouched) row stays all-zero. Empty source → zeros.
+fn resample_row(src: &[f32], new_len: usize) -> Vec<f32> {
+    if new_len == 0 {
+        return Vec::new();
+    }
+    let old_len = src.len();
+    if old_len == 0 {
+        return vec![0.0; new_len];
+    }
+    if old_len == 1 {
+        return vec![src[0]; new_len];
+    }
+    if old_len == new_len {
+        return src.to_vec();
+    }
+    (0..new_len)
+        .map(|i| {
+            let pos = i as f32 / new_len as f32 * old_len as f32; // [0, old_len)
+            let lo = (pos.floor() as usize).min(old_len - 1);
+            let hi = (lo + 1).min(old_len - 1);
+            let frac = pos - lo as f32;
+            src[lo] * (1.0 - frac) + src[hi] * frac
+        })
+        .collect()
+}
+
 /// Rendered period length (samples) for `bucket`: the key's base period scaled
 /// by the bucket's pitch ratio (clamped ≥ 2). A missing/empty ratio means flat.
 fn bucket_period(base_period: usize, ratios: &[f32], bucket: usize) -> usize {
@@ -437,18 +467,6 @@ impl SynthComputeEngine {
         }
     }
 
-    /// Like [`Self::refill_harmonic_curve`] but writes the row only — no
-    /// normalize/dirty/chart side effects. Used by bulk operations that batch
-    /// those once at the end.
-    fn refill_harmonic_curve_quiet(&self, n: usize, chart_type: ChartType) {
-        match self.curve_type_of(n, chart_type) {
-            CurveType::Constant => {
-                self.write_constant_row(n, self.curve_offset_of(n, chart_type), chart_type);
-            }
-            CurveType::NestedFourier => self.write_nested_fourier_row(n, chart_type),
-        }
-    }
-
     fn curve_type_of(&self, n: usize, chart_type: ChartType) -> CurveType {
         match chart_type {
             ChartType::Amp => self.synth_params.harmonics[n].curve_type_amp.value(),
@@ -474,11 +492,18 @@ impl SynthComputeEngine {
             .unwrap_or(0)
     }
 
-    /// Resize the per-bucket synthesis grid to `new_buckets` and refill every
-    /// harmonic's curve. This is the time-resolution of the synthesised
-    /// envelope; only meaningful in Synth mode. Analysis mode derives its bucket
-    /// count from the analysed audio, so callers must not invoke this while
-    /// analysed data is loaded. No-op when the grid is already that size.
+    /// Resize the per-bucket synthesis grid to `new_buckets`, resampling every
+    /// harmonic's *existing* amp/phase envelope onto the new grid. This is the
+    /// time-resolution of the synthesised envelope; only meaningful in Synth
+    /// mode. Analysis mode derives its bucket count from the analysed audio, so
+    /// callers must not invoke this while analysed data is loaded. No-op when the
+    /// grid is already that size.
+    ///
+    /// The rows are resampled (not regenerated from each harmonic's params) on
+    /// purpose: harmonics the user never shaped still carry non-zero param
+    /// defaults, so regenerating would resurrect them as an audible buzz on every
+    /// resize. Resampling preserves exactly what is currently on the grid — an
+    /// all-zero (untouched) row stays silent, and drawn curves keep their shape.
     pub fn set_num_buckets(&self, new_buckets: usize) {
         let new_buckets = new_buckets.max(1);
         {
@@ -489,10 +514,10 @@ impl SynthComputeEngine {
             let mut phase = self.shared_params.phase_data.lock().unwrap();
             let mut norm = self.shared_params.amplitude_data_normalized.lock().unwrap();
             for row in amp.iter_mut() {
-                row.resize(new_buckets, 0.0);
+                *row = resample_row(row, new_buckets);
             }
             for row in phase.iter_mut() {
-                row.resize(new_buckets, 0.0);
+                *row = resample_row(row, new_buckets);
             }
             *norm = vec![vec![0.0; new_buckets]; amp.len()];
         }
@@ -500,14 +525,6 @@ impl SynthComputeEngine {
             // Synth mode is flat (no vibrato); keep the ratio grid sized to match.
             let mut ratio = self.shared_params.bucket_pitch_ratio.lock().unwrap();
             ratio.resize(new_buckets, 1.0);
-        }
-
-        // Re-render every harmonic's amp & phase row onto the new grid, batching
-        // the (expensive) normalize/dirty/chart side effects to a single pass.
-        let n_harm = self.synth_params.harmonics.len();
-        for n in 0..n_harm {
-            self.refill_harmonic_curve_quiet(n, ChartType::Amp);
-            self.refill_harmonic_curve_quiet(n, ChartType::Phase);
         }
 
         self.set_normalization_needed(true);
@@ -1045,6 +1062,52 @@ mod tests {
         let amp_data = engine.shared_params.amplitude_data.lock().unwrap();
         assert_eq!(amp_data.len(), NUM_HARMONICS);
         assert_eq!(amp_data[0].len(), NUM_OF_BUCKETS_DEFAULT);
+    }
+
+    #[test]
+    fn resample_row_preserves_silence_and_constants() {
+        // An all-zero (untouched) row must stay all-zero at any new resolution —
+        // this is what keeps a bucket change from resurrecting default-valued
+        // harmonics as an audible buzz.
+        assert!(resample_row(&[0.0; 70], 2000).iter().all(|&x| x == 0.0));
+        assert!(resample_row(&[0.0; 2000], 30).iter().all(|&x| x == 0.0));
+        // A constant row stays that constant (interpolation is exact between
+        // equal endpoints).
+        assert!(resample_row(&[0.05; 70], 500)
+            .iter()
+            .all(|&x| (x - 0.05).abs() < 1e-6));
+        // Length always matches the request; a single sample broadcasts.
+        assert_eq!(resample_row(&[0.3], 40).len(), 40);
+        assert!(resample_row(&[0.3], 40).iter().all(|&x| x == 0.3));
+        assert_eq!(resample_row(&[0.1, 0.9], 0).len(), 0);
+    }
+
+    #[test]
+    fn set_num_buckets_keeps_untouched_grid_silent() {
+        // Resizing an untouched patch (grid still all zeros) must not introduce
+        // any signal, even though the harmonic params default to non-zero
+        // amplitudes for higher harmonics.
+        let engine = create_test_engine();
+        engine.set_num_buckets(500);
+
+        let amp = engine.shared_params.amplitude_data.lock().unwrap();
+        assert_eq!(amp[0].len(), 500);
+        assert!(amp.iter().all(|row| row.iter().all(|&x| x == 0.0)));
+    }
+
+    #[test]
+    fn set_num_buckets_resizes_and_preserves_drawn_curve() {
+        let engine = create_test_engine();
+        // Draw a constant curve on harmonic 0, then resize.
+        engine.fill_constant_curve(0, 0.5, ChartType::Amp);
+        engine.set_num_buckets(300);
+
+        let amp = engine.shared_params.amplitude_data.lock().unwrap();
+        assert_eq!(amp[0].len(), 300);
+        // The drawn constant survives the resize.
+        assert!(amp[0].iter().all(|&x| (x - 0.5).abs() < 1e-6));
+        // Untouched harmonics stay silent.
+        assert!(amp[1].iter().all(|&x| x == 0.0));
     }
 
     #[test]
