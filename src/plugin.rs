@@ -23,7 +23,7 @@ use nih_plug_egui::{
 
 use crate::constants::*;
 use crate::engine::{ChartType, ExecutionMode, SynthComputeEngine};
-use crate::gui::{draw_analysis_controls, draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_nested_fourier_controls, draw_piano_keyboard, draw_metallic_background, section};
+use crate::gui::{draw_analysis_controls, draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_nested_fourier_controls, draw_piano_keyboard, draw_metallic_background, section, section_with_header};
 use crate::params::LeSynthParams;
 use crate::voice::Voice;
 
@@ -337,82 +337,6 @@ impl Plugin for LeSynth {
                         };
                         section(ui, editor_title, |ui| {
                         if mode == ExecutionMode::Synth {
-                        // ── Bucket count (envelope time-resolution) ───────────────
-                        // Part of the Harmonic Editor. Editable only when no input
-                        // sound is loaded: with analysed audio the grid resolution
-                        // comes from the source and must not be overridden, so the
-                        // slider is shown but disabled.
-                        {
-                            let applied_id = egui::Id::new("applied_num_buckets");
-                            // Apply a restored param value to the grid once on open so
-                            // the grid matches the param. Never while input sound is
-                            // loaded (it would clobber the analysed grid).
-                            if !has_analysis
-                                && ui.data(|d| d.get_temp::<i32>(applied_id)).is_none()
-                            {
-                                let v = synth_params.num_buckets.value();
-                                if synth_compute_engine.num_buckets() != v as usize {
-                                    synth_compute_engine.set_num_buckets(v as usize);
-                                }
-                                ui.data_mut(|d| d.insert_temp(applied_id, v));
-                            }
-
-                            egui::Frame::new()
-                                .fill(egui::Color32::from_gray(45))
-                                .inner_margin(egui::Margin::same(4i8))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("Buckets:")
-                                                .strong()
-                                                .color(egui::Color32::WHITE),
-                                        );
-                                        let resp = ui.add_enabled(
-                                            !has_analysis,
-                                            ParamSlider::for_param(
-                                                &synth_params.num_buckets,
-                                                setter,
-                                            ),
-                                        );
-                                        if has_analysis {
-                                            resp.on_hover_text(
-                                                "Locked: bucket count follows the loaded input sound",
-                                            );
-                                        } else {
-                                            // Applying a new bucket count resizes the
-                                            // grid, refills every harmonic and
-                                            // invalidates all key buffers — too heavy to
-                                            // run per frame. Commit only on drag release
-                                            // or a typed value, never mid-drag.
-                                            let committed = resp.drag_stopped()
-                                                || (resp.changed() && !resp.dragged());
-                                            if committed {
-                                                let v = synth_params.num_buckets.value();
-                                                if ui.data(|d| d.get_temp::<i32>(applied_id))
-                                                    != Some(v)
-                                                {
-                                                    synth_compute_engine
-                                                        .set_num_buckets(v as usize);
-                                                    ui.data_mut(|d| {
-                                                        d.insert_temp(applied_id, v)
-                                                    });
-                                                }
-                                            }
-                                        }
-                                        ui.label(
-                                            egui::RichText::new(if has_analysis {
-                                                "envelope time-resolution (locked to input sound)"
-                                            } else {
-                                                "envelope time-resolution (double-click to type)"
-                                            })
-                                            .size(11.0)
-                                            .color(egui::Color32::from_gray(180)),
-                                        );
-                                    });
-                                });
-                            ui.add_space(6.0);
-                        }
-
                         // The harmonic list is NUM_HARMONICS (256) rows, each a heavy
                         // block of sliders/combos/nested-Fourier controls. egui is
                         // immediate-mode and baseview re-runs this whole closure ~66x/sec,
@@ -615,7 +539,62 @@ impl Plugin for LeSynth {
                         ui.add_space(10.0);
 
                         // ── Live harmonics ────────────────────────────────────────
-                        section(ui, "Live Harmonics", |ui| {
+                        // The Buckets control (envelope time-resolution) lives in this
+                        // section's caption row, roughly centred, so it shares the
+                        // caption's height and never grows the section. It is disabled
+                        // when input sound is loaded (the grid resolution then follows
+                        // the source and must not be overridden).
+                        let buckets_header = |ui: &mut egui::Ui| {
+                            let applied_id = egui::Id::new("applied_num_buckets");
+                            // Apply a restored param value to the grid once on open so
+                            // the grid matches the param. Never while input sound is
+                            // loaded (it would clobber the analysed grid).
+                            if !has_analysis
+                                && ui.data(|d| d.get_temp::<i32>(applied_id)).is_none()
+                            {
+                                let v = synth_params.num_buckets.value();
+                                if synth_compute_engine.num_buckets() != v as usize {
+                                    synth_compute_engine.set_num_buckets(v as usize);
+                                }
+                                ui.data_mut(|d| d.insert_temp(applied_id, v));
+                            }
+
+                            // Push the control group toward the window's horizontal
+                            // centre (approx: the group is ~230 px wide).
+                            let middle = ui.min_rect().left() + content_w * 0.5;
+                            let space = (middle - 115.0 - ui.cursor().min.x).max(8.0);
+                            ui.add_space(space);
+
+                            ui.label(
+                                egui::RichText::new("Buckets:")
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            );
+                            let resp = ui.add_enabled(
+                                !has_analysis,
+                                ParamSlider::for_param(&synth_params.num_buckets, setter),
+                            );
+                            if has_analysis {
+                                resp.on_hover_text(
+                                    "Locked: bucket count follows the loaded input sound",
+                                );
+                            } else {
+                                // Applying a new bucket count resizes the grid and
+                                // invalidates all key buffers — too heavy to run per
+                                // frame. Commit only on drag release or a typed value,
+                                // never mid-drag.
+                                let committed =
+                                    resp.drag_stopped() || (resp.changed() && !resp.dragged());
+                                if committed {
+                                    let v = synth_params.num_buckets.value();
+                                    if ui.data(|d| d.get_temp::<i32>(applied_id)) != Some(v) {
+                                        synth_compute_engine.set_num_buckets(v as usize);
+                                        ui.data_mut(|d| d.insert_temp(applied_id, v));
+                                    }
+                                }
+                            }
+                        };
+                        section_with_header(ui, "Live Harmonics", buckets_header, |ui| {
                             let gutter = 10.0;
                             let chart_w = (content_w - gutter) * 0.5;
                             let chart_h = (window_height * 0.23).max(160.0);

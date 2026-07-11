@@ -50,6 +50,19 @@ pub fn section<R>(
     title: &str,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    section_with_header(ui, title, |_| {}, add_contents)
+}
+
+/// Like [`section`], but `header` renders extra widgets in the same row as the
+/// title (to its right), before the separator. Use it to place a compact
+/// control alongside a section caption without adding a new row — keeping the
+/// section's overall height unchanged.
+pub fn section_with_header<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    header: impl FnOnce(&mut egui::Ui),
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(16, 20, 28, 205))
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(72, 96, 132)))
@@ -57,12 +70,15 @@ pub fn section<R>(
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(
-                egui::RichText::new(title)
-                    .strong()
-                    .size(15.0)
-                    .color(egui::Color32::from_rgb(150, 200, 255)),
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(title)
+                        .strong()
+                        .size(15.0)
+                        .color(egui::Color32::from_rgb(150, 200, 255)),
+                );
+                header(ui);
+            });
             ui.separator();
             ui.add_space(2.0);
             add_contents(ui)
