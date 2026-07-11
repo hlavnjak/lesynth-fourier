@@ -22,7 +22,7 @@ use nih_plug_egui::{
 
 use crate::constants::*;
 use crate::engine::{ChartType, ExecutionMode, SynthComputeEngine};
-use crate::gui::{draw_analysis_controls, draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_nested_fourier_controls, draw_piano_keyboard, draw_metallic_background};
+use crate::gui::{draw_analysis_controls, draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_nested_fourier_controls, draw_piano_keyboard, draw_metallic_background, section};
 use crate::params::LeSynthParams;
 use crate::voice::Voice;
 
@@ -253,33 +253,32 @@ impl Plugin for LeSynth {
                             );
                         }
 
+                        // Width available to section content once the card's
+                        // horizontal inner margin is subtracted, so nothing
+                        // overflows the consistent section borders.
+                        let pad = 10.0;
+                        let content_w = window_width - 2.0 * pad;
+
                         // ── Execution-mode switch ─────────────────────────────────
                         let mut mode = synth_compute_engine.shared_params.execution_mode();
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_gray(45))
-                            .inner_margin(egui::Margin::same(4i8))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("Mode:")
-                                            .strong()
-                                            .color(egui::Color32::WHITE),
-                                    );
-                                    if ui
-                                        .selectable_label(mode == ExecutionMode::Synth, "Synth")
-                                        .clicked()
-                                    {
-                                        mode = ExecutionMode::Synth;
-                                    }
-                                    if ui
-                                        .selectable_label(mode == ExecutionMode::Analysis, "Analysis")
-                                        .clicked()
-                                    {
-                                        mode = ExecutionMode::Analysis;
-                                    }
-                                });
+                        section(ui, "Mode", |ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .selectable_label(mode == ExecutionMode::Synth, "Synth")
+                                    .clicked()
+                                {
+                                    mode = ExecutionMode::Synth;
+                                }
+                                if ui
+                                    .selectable_label(mode == ExecutionMode::Analysis, "Analysis")
+                                    .clicked()
+                                {
+                                    mode = ExecutionMode::Analysis;
+                                }
                             });
+                        });
                         synth_compute_engine.shared_params.set_execution_mode(mode);
+                        ui.add_space(10.0);
 
                         let params_changed_action = || {
                             synth_compute_engine.set_normalization_needed(true);
@@ -302,7 +301,14 @@ impl Plugin for LeSynth {
                             synth_compute_engine.update_assembled_chart_with_key24();
                         };
 
-                        // Keep original structure but make it responsive
+                        // Keep original structure but make it responsive, wrapped
+                        // in a consistent bordered section card.
+                        let editor_title = if mode == ExecutionMode::Synth {
+                            "Harmonic Editor"
+                        } else {
+                            "Analysis"
+                        };
+                        section(ui, editor_title, |ui| {
                         if mode == ExecutionMode::Synth {
                         // The harmonic list is NUM_HARMONICS (256) rows, each a heavy
                         // block of sliders/combos/nested-Fourier controls. egui is
@@ -321,8 +327,8 @@ impl Plugin for LeSynth {
 
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
-                            .max_height(window_height * 0.40)
-                            .max_width(window_width)
+                            .max_height(window_height * 0.24)
+                            .max_width(content_w)
                             .show_rows(
                                 ui,
                                 cached_row_h,
@@ -381,7 +387,7 @@ impl Plugin for LeSynth {
                                                 &params_changed_action,
                                                 MIN_OFFSET_AMP,
                                                 MAX_OFFSET_AMP,
-                                                window_width - 8.0,
+                                                content_w - 8.0,
                                             );
                                         });
 
@@ -397,7 +403,7 @@ impl Plugin for LeSynth {
                                                 harmonic,
                                                 synth_compute_engine.clone(),
                                                 &params_changed_action,
-                                                window_width - 12.0,
+                                                content_w - 12.0,
                                             );
                                         });
 
@@ -428,7 +434,7 @@ impl Plugin for LeSynth {
                                                 &params_changed_action,
                                                 MIN_OFFSET_PHASE,
                                                 MAX_OFFSET_PHASE,
-                                                window_width - 8.0,
+                                                content_w - 8.0,
                                             );
                                         });
 
@@ -444,7 +450,7 @@ impl Plugin for LeSynth {
                                                 harmonic,
                                                 synth_compute_engine.clone(),
                                                 &params_changed_action,
-                                                window_width - 12.0,
+                                                content_w - 12.0,
                                             );
                                         });
 
@@ -468,8 +474,8 @@ impl Plugin for LeSynth {
                             // keyboard + charts below line up in both modes.
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false; 2])
-                                .max_height(window_height * 0.40)
-                                .max_width(window_width)
+                                .max_height(window_height * 0.24)
+                                .max_width(content_w)
                                 .show(ui, |ui| {
                                     egui::Frame::new()
                                         .fill(egui::Color32::from_rgb(18, 25, 45))
@@ -478,89 +484,101 @@ impl Plugin for LeSynth {
                                             draw_analysis_controls(
                                                 ui,
                                                 &synth_compute_engine,
-                                                window_width - 12.0,
+                                                content_w - 12.0,
                                                 window_height,
                                             );
                                         });
                                 });
                         }
-
-
-                        ui.add_space(8.0);
-
-                        let input = ui.input(|i| i.clone());
-                        let gutter = 10.0;
-
-                        draw_piano_keyboard(
-                            egui_ctx,
-                            ui,
-                            &input,
-                            last_key_id,
-                            last_key_id_persist,
-                            &synth_compute_engine,
-                            window_width - 1.5*gutter,
-                            window_height,
-                            1.0,
-                        );
-
-                        ui.add_space(30.0);
-                        let chart_w = (window_width - gutter) * 0.5;
-                        let chart_h = (window_height * 0.23).max(160.0);
-                        // Anchor the harmonic plots to the live flow cursor instead of a
-                        // hardcoded 0.62*window_height. The absolute rects below must line
-                        // up with the space reserved by allocate_space() so the assembled
-                        // chart that follows in flow doesn't overlap them.
-                        let plot_start_point = egui::pos2(0.0, ui.cursor().min.y);
-                        let right_w = chart_w - gutter;
-
-                        let left_rect = egui::Rect::from_min_size(
-                            plot_start_point,
-                            egui::vec2(chart_w, chart_h),
-                        );
-
-                        let right_rect = egui::Rect::from_min_size(
-                            plot_start_point + egui::vec2(chart_w + gutter, 0.0),
-                            egui::vec2(right_w, chart_h),
-                        );
-
-                        ui.allocate_space(egui::vec2(window_width, chart_h));
-
-
-                        ui.allocate_new_ui(
-                            egui::UiBuilder::new()
-                                .max_rect(left_rect)
-                                .layout(*ui.layout()),
-                            |ui| {
-                                draw_harmonic_plot(
-                                    ui,
-                                    "Amplitude",
-                                    ChartType::Amp,
-                                    chart_w,
-                                    chart_h,
-                                    &synth_compute_engine,
-                                );
-                            },
-                        );
-
-                        ui.allocate_new_ui(
-                            egui::UiBuilder::new()
-                                .max_rect(right_rect)
-                                .layout(*ui.layout()),
-                            |ui| {
-                                draw_harmonic_plot(
-                                    ui,
-                                    "Phase",
-                                    ChartType::Phase,
-                                    right_w,
-                                    chart_h,
-                                    &synth_compute_engine,
-                                );
-                            },
-                        );
-
+                        });
                         ui.add_space(10.0);
 
-                        draw_assembled_chart(ui, &synth_compute_engine, window_width, window_height);
+                        // ── Keyboard ──────────────────────────────────────────────
+                        section(ui, "Keyboard", |ui| {
+                            let input = ui.input(|i| i.clone());
+                            let gutter = 10.0;
+                            draw_piano_keyboard(
+                                egui_ctx,
+                                ui,
+                                &input,
+                                last_key_id,
+                                last_key_id_persist,
+                                &synth_compute_engine,
+                                content_w - 1.5 * gutter,
+                                window_height,
+                                1.0,
+                            );
+                        });
+                        ui.add_space(10.0);
+
+                        // ── Live harmonics ────────────────────────────────────────
+                        section(ui, "Live Harmonics", |ui| {
+                            let gutter = 10.0;
+                            let chart_w = (content_w - gutter) * 0.5;
+                            let chart_h = (window_height * 0.23).max(160.0);
+                            // Anchor the harmonic plots to the live flow cursor (inside
+                            // this card) so the absolute rects below line up with the
+                            // space reserved by allocate_space() and stay within the
+                            // section border.
+                            let plot_start_point =
+                                egui::pos2(ui.cursor().min.x, ui.cursor().min.y);
+                            let right_w = chart_w - gutter;
+
+                            let left_rect = egui::Rect::from_min_size(
+                                plot_start_point,
+                                egui::vec2(chart_w, chart_h),
+                            );
+
+                            let right_rect = egui::Rect::from_min_size(
+                                plot_start_point + egui::vec2(chart_w + gutter, 0.0),
+                                egui::vec2(right_w, chart_h),
+                            );
+
+                            ui.allocate_space(egui::vec2(content_w, chart_h));
+
+                            ui.allocate_new_ui(
+                                egui::UiBuilder::new()
+                                    .max_rect(left_rect)
+                                    .layout(*ui.layout()),
+                                |ui| {
+                                    draw_harmonic_plot(
+                                        ui,
+                                        "Amplitude",
+                                        ChartType::Amp,
+                                        chart_w,
+                                        chart_h,
+                                        &synth_compute_engine,
+                                    );
+                                },
+                            );
+
+                            ui.allocate_new_ui(
+                                egui::UiBuilder::new()
+                                    .max_rect(right_rect)
+                                    .layout(*ui.layout()),
+                                |ui| {
+                                    draw_harmonic_plot(
+                                        ui,
+                                        "Phase",
+                                        ChartType::Phase,
+                                        right_w,
+                                        chart_h,
+                                        &synth_compute_engine,
+                                    );
+                                },
+                            );
+                        });
+                        ui.add_space(10.0);
+
+                        // ── Assembled sound ───────────────────────────────────────
+                        section(ui, "Assembled Sound", |ui| {
+                            draw_assembled_chart(
+                                ui,
+                                &synth_compute_engine,
+                                content_w,
+                                window_height,
+                            );
+                        });
                 });
             },
         )
