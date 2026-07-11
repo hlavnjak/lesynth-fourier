@@ -40,9 +40,9 @@ fn get_black_key_x_pos(key_index: usize) -> f32 {
     let within_octave = match c_octave_pos {
         1 => 0.7,   // C#
         3 => 1.7,   // D#
-        6 => 3.3,   // F#
-        8 => 4.3,   // G#
-        10 => 5.3,  // A#
+        6 => 3.7,   // F#
+        8 => 4.7,   // G#
+        10 => 5.7,  // A#
         _ => 0.0,
     };
     // Subtract 5.0 because A0 is the 6th white key (index 5) in the C0-relative system
