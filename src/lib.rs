@@ -199,25 +199,50 @@ mod ffi_tests {
     }
 }
 
-#[cfg(all(debug_assertions, feature = "debug-logging"))]
 use std::sync::Once;
-#[cfg(all(debug_assertions, feature = "debug-logging"))]
 static INIT_LOGGER: Once = Once::new();
 
-#[cfg(all(debug_assertions, feature = "debug-logging"))]
+/// Initialise the plugin's own logger.
+///
+/// The plugin is a `cdylib` loaded into the host process, but Rust statically
+/// links a *private* copy of the `log` crate (and its global logger) into every
+/// dynamic library. So the host's logger is unreachable from here — the plugin
+/// has to install its own. We route records to `<tmpdir>/lesynth.log` (e.g.
+/// `/tmp/lesynth.log`) so they're readable regardless of how the host was
+/// launched, and default to `Info` so this works in release builds. `RUST_LOG`
+/// can still override the level/filters if set.
 pub fn init_logging() {
     INIT_LOGGER.call_once(|| {
         use std::fs::OpenOptions;
         use std::io::Write;
-        
-        let log_file = std::env::temp_dir().join("lesynth.log");
-        
-        env_logger::Builder::new()
-            .filter_level(log::LevelFilter::Debug)
+
+        let log_path = std::env::temp_dir().join("lesynth.log");
+
+        let Ok(file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        else {
+            // Nowhere to log to — leave the no-op logger in place rather than
+            // crash the host on plugin instantiation.
+            return;
+        };
+
+        // Session separator, written directly so it isn't prefixed like a record.
+        {
+            let mut file = &file;
+            let _ = writeln!(file, "\n=== LeSynth session started ===");
+        }
+
+        let _ = env_logger::Builder::new()
+            .filter_level(log::LevelFilter::Info)
+            .parse_default_env() // honour RUST_LOG when present
             .format(|buf, record| {
                 use std::io::Write;
                 let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-                writeln!(buf, "[{}] [{}] [{}:{}] {}", 
+                writeln!(
+                    buf,
+                    "[{}] [{}] [{}:{}] {}",
                     timestamp,
                     record.level(),
                     record.file().unwrap_or("unknown"),
@@ -225,23 +250,11 @@ pub fn init_logging() {
                     record.args()
                 )
             })
-            .init();
-            
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_file) 
-        {
-            let _ = writeln!(file, "\n=== LeSynth Debug Session Started ===");
-        }
-        
-        log::info!("LeSynth logging initialized. Log file: {:?}", log_file);
-    });
-}
+            .target(env_logger::Target::Pipe(Box::new(file)))
+            .try_init();
 
-#[cfg(not(all(debug_assertions, feature = "debug-logging")))]
-pub fn init_logging() {
-    // No-op when not in debug build with debug-logging feature
+        log::info!("LeSynth logging initialized. Log file: {:?}", log_path);
+    });
 }
 
 nih_plug::nih_export_vst3!(LeSynth);
