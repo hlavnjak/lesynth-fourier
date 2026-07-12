@@ -239,10 +239,21 @@ impl Plugin for LeSynth {
                 let mut last_pressed_key_persist: Option<usize> = Some(15);
 
                 // The following params are changed when the window is resized
-                let (window_width, window_height) = synth_params.editor_state.size();
-                let window_width = window_width as f32;
-                let window_height = window_height as f32;
-                egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(window_width, window_height)));
+                let (win_w, win_h) = synth_params.editor_state.size();
+                let window_width = win_w as f32;
+                let window_height = win_h as f32;
+                // Only ask baseview to resize when the size actually changed.
+                // Sending InnerSize every frame forces a window.resize each
+                // frame, which bounces back as a repaint and stops the editor
+                // from ever idling.
+                let last_size_id = egui::Id::new("last_sent_inner_size");
+                let last_sent = egui_ctx.memory(|m| m.data.get_temp::<(u32, u32)>(last_size_id));
+                if last_sent != Some((win_w, win_h)) {
+                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                        egui::Vec2::new(window_width, window_height),
+                    ));
+                    egui_ctx.memory_mut(|m| m.data.insert_temp(last_size_id, (win_w, win_h)));
+                }
 
                 egui_ctx.memory_mut(|mem| {
                     last_pressed_key =
