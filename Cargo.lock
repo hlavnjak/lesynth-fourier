@@ -167,7 +167,7 @@ dependencies = [
 [[package]]
 name = "baseview"
 version = "0.1.0"
-source = "git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0#9a0b42c09d712777b2edb4c5e0cb6baf21e988f0"
+source = "git+https://github.com/hlavnjak/baseview?branch=reactive-idle-wait#309b1387b722310ddf34e90ee70d4319a5916060"
 dependencies = [
  "cocoa",
  "core-foundation",
@@ -547,7 +547,7 @@ dependencies = [
 [[package]]
 name = "egui-baseview"
 version = "0.5.0"
-source = "git+https://github.com/BillyDM/egui-baseview.git?rev=ec70c3fe6b2f070dcacbc22924431edbe24bd1c0#ec70c3fe6b2f070dcacbc22924431edbe24bd1c0"
+source = "git+https://github.com/hlavnjak/egui-baseview?branch=reactive-idle-wait#9e6f6f0534ba1185ab944c73b2114296bfecf34c"
 dependencies = [
  "baseview",
  "copypasta",
@@ -1067,7 +1067,7 @@ dependencies = [
 [[package]]
 name = "nih_plug"
 version = "0.0.0"
-source = "git+https://github.com/hlavnjak/nih-plug?branch=host_triggered_resizing#7233a4b89937289a895d67c6ffe7d0f129c068c8"
+source = "git+https://github.com/hlavnjak/nih-plug?branch=reduce_egui_high_cpu_consumption#d8c61c3b3642b49bff59cbcdf610c600b7169a66"
 dependencies = [
  "anyhow",
  "anymap3",
@@ -1097,7 +1097,7 @@ dependencies = [
 [[package]]
 name = "nih_plug_derive"
 version = "0.1.0"
-source = "git+https://github.com/hlavnjak/nih-plug?branch=host_triggered_resizing#7233a4b89937289a895d67c6ffe7d0f129c068c8"
+source = "git+https://github.com/hlavnjak/nih-plug?branch=reduce_egui_high_cpu_consumption#d8c61c3b3642b49bff59cbcdf610c600b7169a66"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1107,7 +1107,7 @@ dependencies = [
 [[package]]
 name = "nih_plug_egui"
 version = "0.0.0"
-source = "git+https://github.com/hlavnjak/nih-plug?branch=host_triggered_resizing#7233a4b89937289a895d67c6ffe7d0f129c068c8"
+source = "git+https://github.com/hlavnjak/nih-plug?branch=reduce_egui_high_cpu_consumption#d8c61c3b3642b49bff59cbcdf610c600b7169a66"
 dependencies = [
  "baseview",
  "crossbeam",

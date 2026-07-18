@@ -93,6 +93,8 @@ impl Plugin for LeSynth {
         let repeat_playback = shared.repeat_playback();
 
         // --- Handle incoming MIDI events (build/stop voices) ---
+        // Wake the idle editor once after the batch if any voice changed.
+        let mut voices_changed = false;
         while let Some(event) = context.next_event() {
             match event {
                 NoteEvent::NoteOn { note, .. } => {
@@ -110,6 +112,7 @@ impl Plugin for LeSynth {
                             fade_out_active: false,
                             fade_out_pos: 0,
                         });
+                        voices_changed = true;
                     }
                 }
                 NoteEvent::NoteOff { note, .. } => {
@@ -120,10 +123,15 @@ impl Plugin for LeSynth {
                             v.fade_out_active = true;
                             v.fade_out_pos = 0;
                         }
+                        voices_changed = true;
                     }
                 }
                 _ => {}
             }
+        }
+        // Wake the editor so the key highlight appears immediately.
+        if voices_changed {
+            crate::wake_editor();
         }
 
         // --- Mixdown all active voices into the output buffer with headroom ---
@@ -232,6 +240,64 @@ impl Plugin for LeSynth {
             (),
             |_, _| {},
             move |egui_ctx, setter, _state| {
+                // True iff egui will paint this pass; retained for reference only.
+                let repaint_pending = egui_ctx.has_requested_repaint();
+
+                // Track the built size (resize forces a render without egui's flag).
+                let screen_size = egui_ctx.screen_rect().size();
+                let size_id = egui::Id::new("last_built_screen_size");
+                let size_changed =
+                    egui_ctx.memory(|m| m.data.get_temp::<egui::Vec2>(size_id)) != Some(screen_size);
+
+                // Poll voices (set off-thread by MIDI) to sustain frames while audible.
+                let has_active_voice = synth_compute_engine
+                    .shared_params
+                    .voices
+                    .lock()
+                    .map(|v| v.iter().any(|slot| slot.is_some()))
+                    .unwrap_or(true);
+
+                let computation_active = synth_compute_engine
+                    .shared_params
+                    .buffer_states
+                    .lock()
+                    .map(|s| {
+                        s.iter().any(|st| {
+                            *st != crate::engine::shared_params::BufferState::Clean
+                        })
+                    })
+                    .unwrap_or(false);
+
+                // Register this context so off-thread events can wake the idle editor.
+                crate::register_editor_waker(egui_ctx.clone());
+
+                // Drain any host-pushed analysis job.
+                let pending_job = crate::claim_analysis_job();
+
+                // The reactive gate lives in our egui-baseview fork's `on_frame`; this
+                // closure only runs on frames that will render, so always build a full UI.
+                let _ = (repaint_pending, size_changed);
+                log::info!("EGUI after return");
+                // Remember the built size.
+                egui_ctx.memory_mut(|m| m.data.insert_temp(size_id, screen_size));
+
+                // Sustain repaints while voices sound or buffers recompute.
+                if has_active_voice || computation_active {
+                    egui_ctx.request_repaint();
+                }
+
+                // Run any host-pushed analysis and repaint to show the result.
+                if let Some(job) = pending_job {
+                    synth_compute_engine.analyze_and_load(
+                        &job.samples,
+                        job.sample_rate,
+                        job.base_freq,
+                        &job.contour,
+                        0,
+                    );
+                    egui_ctx.request_repaint();
+                }
+
                 let last_key_id = egui::Id::new("last_pressed_key");
                 let last_key_id_persist = egui::Id::new("last_pressed_key_persist");
 
@@ -266,18 +332,7 @@ impl Plugin for LeSynth {
                         // Draw metallic background
                         draw_metallic_background(ui, window_width, window_height);
 
-                        // ── Host-pushed analysis jobs ─────────────────────────────
-                        // If the host DAW pushed a subtrack to analyse, claim it,
-                        // run the analysis and flip into Analysis mode.
-                        if let Some(job) = crate::claim_analysis_job() {
-                            synth_compute_engine.analyze_and_load(
-                                &job.samples,
-                                job.sample_rate,
-                                job.base_freq,
-                                &job.contour,
-                                0,
-                            );
-                        }
+                        // (Analysis jobs are claimed + run at the top of this closure.)
 
                         // Width available to section content once the card's
                         // horizontal inner margin is subtracted, so nothing

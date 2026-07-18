@@ -48,6 +48,26 @@ pub struct AnalysisJob {
 
 static ANALYSIS_INBOX: Mutex<VecDeque<AnalysisJob>> = Mutex::new(VecDeque::new());
 
+/// Editor egui context, registered so background threads can wake the idle
+/// editor (it blocks its event loop when idle) via [`wake_editor`].
+static EDITOR_WAKER: Mutex<Option<nih_plug_egui::egui::Context>> = Mutex::new(None);
+
+/// Register the editor's egui context (replacing any previous).
+pub(crate) fn register_editor_waker(ctx: nih_plug_egui::egui::Context) {
+    if let Ok(mut g) = EDITOR_WAKER.lock() {
+        *g = Some(ctx);
+    }
+}
+
+/// Repaint the registered editor to pick up off-thread state. No-op if none.
+pub(crate) fn wake_editor() {
+    if let Ok(g) = EDITOR_WAKER.lock() {
+        if let Some(ctx) = g.as_ref() {
+            ctx.request_repaint();
+        }
+    }
+}
+
 /// Claim the oldest pending analysis job (called by a plugin editor).
 pub(crate) fn claim_analysis_job() -> Option<AnalysisJob> {
     ANALYSIS_INBOX.lock().ok().and_then(|mut q| q.pop_front())
@@ -86,13 +106,16 @@ pub unsafe extern "C" fn lesynth_fourier_push_analysis(
         base_freq,
         contour,
     };
-    match ANALYSIS_INBOX.lock() {
+    let depth = match ANALYSIS_INBOX.lock() {
         Ok(mut q) => {
             q.push_back(job);
             q.len() as u64
         }
         Err(_) => 0,
-    }
+    };
+    // Wake the idle editor to claim and render the job.
+    wake_editor();
+    depth
 }
 
 /// Stateless harmonic analysis, for the host's own preview plotting.

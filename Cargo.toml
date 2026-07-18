@@ -7,8 +7,8 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-nih_plug = { git = "https://github.com/hlavnjak/nih-plug", branch = "host_triggered_resizing", package = "nih_plug", features = ["vst3"] }
-nih_plug_egui = { git = "https://github.com/hlavnjak/nih-plug", branch = "host_triggered_resizing", package = "nih_plug_egui" }
+nih_plug = { git = "https://github.com/hlavnjak/nih-plug", branch = "reduce_egui_high_cpu_consumption", package = "nih_plug", features = ["vst3"] }
+nih_plug_egui = { git = "https://github.com/hlavnjak/nih-plug", branch = "reduce_egui_high_cpu_consumption", package = "nih_plug_egui" }
 egui_plot = "0.31.0"
 realfft = "3"
 serde = { version = "1.0", features = ["derive"] }
