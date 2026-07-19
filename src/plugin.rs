@@ -37,9 +37,13 @@ impl Default for LeSynth {
         crate::init_logging();
         
         let synth_params = Arc::new(LeSynthParams::default());
+        let synth_compute_engine = Arc::new(SynthComputeEngine::new(synth_params.clone()));
+        // If the host tagged this instance (via lesynth_fourier_prepare_instance),
+        // register it so the host can later export/import its grid by token.
+        crate::register_new_instance(&synth_compute_engine);
         Self {
-            synth_params: synth_params.clone(),
-            synth_compute_engine: Arc::new(SynthComputeEngine::new(synth_params)),
+            synth_params,
+            synth_compute_engine,
         }
     }
 }

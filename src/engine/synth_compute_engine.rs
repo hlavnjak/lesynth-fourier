@@ -1041,6 +1041,43 @@ impl SynthComputeEngine {
             .set_execution_mode(super::ExecutionMode::Analysis);
         self.load_analysis(&result);
     }
+
+    /// Load a precomputed harmonic grid directly (from a saved LeSynth track),
+    /// bypassing DFT analysis. Mirrors the tail of [`analyze_and_load`]: records
+    /// the source duration and fundamental, switches to Analysis mode, and hands
+    /// the grid to [`load_analysis`]. `amplitude`/`phase` are `[harmonic][bucket]`;
+    /// `pitch_ratio` is one entry per bucket (`f_local / base_freq`).
+    ///
+    /// The instance's playback sample rate is left untouched (it must stay at the
+    /// host device rate), so a note still lasts `duration_secs` of wall-clock time
+    /// regardless of the rate the grid was captured at.
+    pub fn load_grid(
+        &self,
+        amplitude: Vec<Vec<f32>>,
+        phase: Vec<Vec<f32>>,
+        pitch_ratio: Vec<f32>,
+        base_freq: f32,
+        duration_secs: f32,
+    ) {
+        // `bucket_periods` is informational only (`load_analysis` ignores it);
+        // derive it from the current playback rate for a consistent snapshot.
+        let sr = *self.shared_params.sample_rate.lock().unwrap();
+        let bucket_periods: Vec<f32> = pitch_ratio
+            .iter()
+            .map(|&r| sr / (base_freq.max(1.0) * r.max(1e-6)))
+            .collect();
+        let result = super::AnalysisResult {
+            amplitude,
+            phase,
+            bucket_periods,
+            pitch_ratio,
+        };
+        *self.shared_params.analysis_duration_secs.lock().unwrap() = duration_secs.max(0.0);
+        *self.shared_params.analysis_base_freq.lock().unwrap() = base_freq.max(0.0);
+        self.shared_params
+            .set_execution_mode(super::ExecutionMode::Analysis);
+        self.load_analysis(&result);
+    }
 }
 
 #[cfg(test)]
@@ -1108,6 +1145,41 @@ mod tests {
         assert!(amp[0].iter().all(|&x| (x - 0.5).abs() < 1e-6));
         // Untouched harmonics stay silent.
         assert!(amp[1].iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn load_grid_sets_analysis_state() {
+        // Loading a precomputed grid (a saved track) must copy amp/phase/ratio
+        // into the live state, resize to the file's bucket count, and switch the
+        // instance to Analysis mode with the recorded base freq / duration.
+        let engine = create_test_engine();
+        let nb = 5;
+        let mut amplitude = vec![vec![0.0f32; nb]; NUM_HARMONICS];
+        let mut phase = vec![vec![0.0f32; nb]; NUM_HARMONICS];
+        amplitude[0] = vec![0.5; nb];
+        amplitude[1] = vec![0.25; nb];
+        phase[1] = vec![1.0; nb];
+        let pitch_ratio = vec![1.0, 1.01, 0.99, 1.0, 1.0];
+
+        engine.load_grid(amplitude, phase, pitch_ratio.clone(), 220.0, 0.75);
+
+        assert_eq!(engine.shared_params.execution_mode(), ExecutionMode::Analysis);
+        assert_eq!(*engine.shared_params.analysis_base_freq.lock().unwrap(), 220.0);
+        assert!(
+            (*engine.shared_params.analysis_duration_secs.lock().unwrap() - 0.75).abs() < 1e-6
+        );
+
+        let amp = engine.shared_params.amplitude_data.lock().unwrap();
+        assert_eq!(amp[0].len(), nb, "grid resized to the file's bucket count");
+        assert!(amp[0].iter().all(|&x| (x - 0.5).abs() < 1e-6));
+        assert!(amp[1].iter().all(|&x| (x - 0.25).abs() < 1e-6));
+        assert!(amp[2].iter().all(|&x| x == 0.0), "untouched harmonics stay silent");
+        drop(amp);
+
+        assert!(engine.shared_params.phase_data.lock().unwrap()[1]
+            .iter()
+            .all(|&x| (x - 1.0).abs() < 1e-6));
+        assert_eq!(*engine.shared_params.bucket_pitch_ratio.lock().unwrap(), pitch_ratio);
     }
 
     #[test]
