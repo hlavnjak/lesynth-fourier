@@ -302,7 +302,33 @@ impl SynthComputeEngine {
         engine
     }
 
+    /// Whether harmonic `n`'s hand-drawn Synth-mode curve is allowed to
+    /// overwrite its live grid row for `chart_type`.
+    ///
+    /// In plain Synth mode (no analysed audio loaded) the drawn curve always
+    /// owns the row — the per-harmonic "cust" override is implicitly on. Once an
+    /// analysis is loaded, the row belongs to the data extracted from the source
+    /// sound, and a drawn curve must replace it only when the user has ticked
+    /// "cust" for that harmonic. Without this gate, drawing in Synth mode would
+    /// silently clobber a loaded sound's analysed row even though "cust" was
+    /// never selected.
+    fn curve_overrides_live(&self, n: usize, chart_type: ChartType) -> bool {
+        let has_analysis = *self.shared_params.analysis_duration_secs.lock().unwrap() > 0.0;
+        if !has_analysis {
+            return true;
+        }
+        let flags = match chart_type {
+            ChartType::Amp => self.shared_params.harmonic_ampl_custom.lock().unwrap(),
+            ChartType::Phase => self.shared_params.harmonic_phase_custom.lock().unwrap(),
+        };
+        flags.get(n).copied().unwrap_or(false)
+    }
+
     pub fn fill_constant_curve(&self, n: usize, value: f32, chart_type: ChartType) {
+        // Don't override an analysed row unless "cust" is selected for it.
+        if !self.curve_overrides_live(n, chart_type) {
+            return;
+        }
         let wobble_amp = match chart_type {
             ChartType::Amp => self.synth_params.harmonics[n].wobble_amp_amp.value(),
             ChartType::Phase => self.synth_params.harmonics[n].wobble_amp_phase.value(),
@@ -364,6 +390,10 @@ impl SynthComputeEngine {
     }
 
     pub fn fill_sin_curve(&self, n: usize, chart_type: ChartType) {
+        // Don't override an analysed row unless "cust" is selected for it.
+        if !self.curve_overrides_live(n, chart_type) {
+            return;
+        }
         let a = match chart_type {
             ChartType::Amp => self.synth_params.harmonics[n].sine_curve_amp_amp.value(),
             ChartType::Phase => self.synth_params.harmonics[n].sine_curve_amp_phase.value(),
@@ -415,6 +445,12 @@ impl SynthComputeEngine {
     /// The amplitude chart clamps the result to [0, 1]; the phase chart leaves it unclamped.
     /// Each chart uses its own independent set of sub-harmonic parameters.
     pub fn fill_nested_fourier_curve(&self, n: usize, chart_type: ChartType) {
+        // Don't override an analysed row unless "cust" is selected for it. The
+        // "cust" toggle enables the flag *before* calling this (via
+        // refill_harmonic_curve), so the override path still writes through.
+        if !self.curve_overrides_live(n, chart_type) {
+            return;
+        }
         self.write_nested_fourier_row(n, chart_type);
         self.set_normalization_needed(true);
         self.shared_params.mark_all_buffers_dirty();
@@ -1365,6 +1401,46 @@ mod tests {
         engine.set_harmonic_custom(h, ChartType::Amp, false);
         assert!(!engine.shared_params.harmonic_ampl_custom.lock().unwrap()[h]);
         assert_eq!(snapshot, engine.shared_params.amplitude_data.lock().unwrap()[h]);
+    }
+
+    #[test]
+    fn drawing_does_not_override_analysed_row_without_cust() {
+        // Regression: with an analysis loaded, drawing a Synth-mode curve for a
+        // harmonic must NOT touch its live (analysed) row until "cust" is ticked.
+        let engine = create_test_engine();
+        engine.analyze_and_load(&tone(44100.0, 440.0, 1.0), 44100.0, 440.0, &[], 0);
+        let h = 1usize;
+
+        let analysed = engine.shared_params.amplitude_data.lock().unwrap()[h].clone();
+        assert!(analysed.iter().any(|&x| x != 0.0), "test needs a non-empty analysed row");
+
+        // Shape a distinctive Synth-mode curve (default curve type is
+        // NestedFourier) so an override would be plainly visible on the row.
+        engine.synth_params.harmonics[h]
+            .nested_fourier
+            .write()
+            .unwrap()
+            .series_mut(ChartType::Amp)
+            .amps[0] = 0.5;
+
+        // "cust" is off (fresh analysis) → the drawn curve is ignored on the grid.
+        assert!(!engine.shared_params.harmonic_ampl_custom.lock().unwrap()[h]);
+        engine.fill_constant_curve(h, 0.9, ChartType::Amp);
+        engine.fill_nested_fourier_curve(h, ChartType::Amp);
+        assert_eq!(
+            analysed,
+            engine.shared_params.amplitude_data.lock().unwrap()[h],
+            "drawing without cust must not clobber the analysed row"
+        );
+
+        // Ticking "cust" applies the drawn Synth-mode curve, so the live row must
+        // now depart from the analysed data.
+        engine.set_harmonic_custom(h, ChartType::Amp, true);
+        assert_ne!(
+            analysed,
+            engine.shared_params.amplitude_data.lock().unwrap()[h],
+            "enabling cust must override the row with the drawn curve"
+        );
     }
 
     #[test]
