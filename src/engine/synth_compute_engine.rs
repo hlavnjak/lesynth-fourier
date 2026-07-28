@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
@@ -282,10 +282,25 @@ fn target_samples_for(shared_params: &SharedParams) -> usize {
     }
 }
 
-#[derive(Clone)]
+// Deliberately not `Clone`: the engine is always used behind an `Arc` (the
+// registry holds `Weak`s to it), and a value-copy would duplicate the analysis
+// mailbox and editor registration while the background compute thread kept
+// serving only the original.
 pub struct SynthComputeEngine {
     synth_params: Arc<LeSynthParams>,
     pub shared_params: Arc<SharedParams>,
+    /// Analysis job the host pushed *for this instance*, waiting to be claimed
+    /// by this instance's editor. A single slot rather than a queue: the host
+    /// pushes at most one subtrack per instance, and a second push supersedes an
+    /// unclaimed first.
+    ///
+    /// Per-instance because several editors can be open at once — a shared inbox
+    /// lets whichever editor happens to paint first swallow another instance's
+    /// job, leaving that instance with empty charts.
+    pending_analysis: Mutex<Option<crate::AnalysisJob>>,
+    /// This instance's editor egui context, registered while its editor is open
+    /// so off-thread events (host pushes, MIDI) can wake *this* idle editor.
+    editor_ctx: Mutex<Option<nih_plug_egui::egui::Context>>,
 }
 
 impl SynthComputeEngine {
@@ -294,12 +309,44 @@ impl SynthComputeEngine {
         let engine = Self {
             synth_params: synth_params_p,
             shared_params: Arc::new(SharedParams::new(NUM_HARMONICS, buckets)),
+            pending_analysis: Mutex::new(None),
+            editor_ctx: Mutex::new(None),
         };
-        
+
         // Start background computation thread
         engine.start_async_computation_thread();
-        
+
         engine
+    }
+
+    /// Register this instance's editor context (replacing any previous), so
+    /// [`wake_editor`](Self::wake_editor) can repaint it while it sits idle.
+    pub fn set_editor_ctx(&self, ctx: nih_plug_egui::egui::Context) {
+        if let Ok(mut g) = self.editor_ctx.lock() {
+            *g = Some(ctx);
+        }
+    }
+
+    /// Repaint this instance's editor to pick up off-thread state. No-op when
+    /// this instance has no editor open.
+    pub fn wake_editor(&self) {
+        if let Ok(g) = self.editor_ctx.lock() {
+            if let Some(ctx) = g.as_ref() {
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Hand this instance an analysis job, replacing any still unclaimed.
+    pub fn push_analysis_job(&self, job: crate::AnalysisJob) {
+        if let Ok(mut g) = self.pending_analysis.lock() {
+            *g = Some(job);
+        }
+    }
+
+    /// Take this instance's pending analysis job, if any (called by its editor).
+    pub fn take_analysis_job(&self) -> Option<crate::AnalysisJob> {
+        self.pending_analysis.lock().ok().and_then(|mut g| g.take())
     }
 
     /// Whether harmonic `n`'s hand-drawn Synth-mode curve is allowed to

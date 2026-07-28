@@ -133,9 +133,9 @@ impl Plugin for LeSynth {
                 _ => {}
             }
         }
-        // Wake the editor so the key highlight appears immediately.
+        // Wake this instance's editor so the key highlight appears immediately.
         if voices_changed {
-            crate::wake_editor();
+            self.synth_compute_engine.wake_editor();
         }
 
         // --- Mixdown all active voices into the output buffer with headroom ---
@@ -272,11 +272,15 @@ impl Plugin for LeSynth {
                     })
                     .unwrap_or(false);
 
-                // Register this context so off-thread events can wake the idle editor.
-                crate::register_editor_waker(egui_ctx.clone());
+                // Register this context so off-thread events can wake *this*
+                // instance's idle editor (each open editor has its own).
+                synth_compute_engine.set_editor_ctx(egui_ctx.clone());
 
-                // Drain any host-pushed analysis job.
-                let pending_job = crate::claim_analysis_job();
+                // Drain a host-pushed analysis job: one addressed to this
+                // instance first, else an untargeted (legacy) one.
+                let pending_job = synth_compute_engine
+                    .take_analysis_job()
+                    .or_else(crate::claim_analysis_job);
 
                 // The reactive gate lives in our egui-baseview fork's `on_frame`; this
                 // closure only runs on frames that will render, so always build a full UI.

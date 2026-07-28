@@ -27,9 +27,15 @@ pub use plugin::LeSynth;
 // The host DAW loads this same shared object (it is both the VST3 plugin and a
 // plain cdylib). These exported functions let the host feed recorded audio
 // "subtracks" to the plugin for Fourier analysis. Because the host's VST3
-// component instances live in *this* shared object's address space, a global
-// inbox here is shared with them: the host pushes a job, the running editor
-// claims it and runs the analysis on its own engine.
+// component instances live in *this* shared object's address space, the host can
+// hand a job straight to one of them: it addresses a job to the instance it
+// tagged (see the registry below), the job waits in that instance, and that
+// instance's editor claims it and runs the analysis on its own engine.
+//
+// Everything here is keyed per instance rather than global, because a host can
+// have several editors open at once (one per track). A shared "active editor"
+// or shared inbox lets whichever editor happens to paint first swallow another
+// instance's job, so the track the host meant to fill comes up with empty charts.
 // ───────────────────────────────────────────────────────────────────────────
 
 use std::collections::VecDeque;
@@ -48,29 +54,15 @@ pub struct AnalysisJob {
     pub contour: Vec<f32>,
 }
 
+/// Untargeted analysis jobs, from hosts that push without naming an instance
+/// (the legacy [`lesynth_fourier_push_analysis`] entry point). Whichever editor
+/// paints first claims the oldest — fine when a single editor is open, which is
+/// the only case this path can serve unambiguously. Hosts that open several
+/// editors must use [`lesynth_fourier_push_analysis_to`] instead.
 static ANALYSIS_INBOX: Mutex<VecDeque<AnalysisJob>> = Mutex::new(VecDeque::new());
 
-/// Editor egui context, registered so background threads can wake the idle
-/// editor (it blocks its event loop when idle) via [`wake_editor`].
-static EDITOR_WAKER: Mutex<Option<nih_plug_egui::egui::Context>> = Mutex::new(None);
-
-/// Register the editor's egui context (replacing any previous).
-pub(crate) fn register_editor_waker(ctx: nih_plug_egui::egui::Context) {
-    if let Ok(mut g) = EDITOR_WAKER.lock() {
-        *g = Some(ctx);
-    }
-}
-
-/// Repaint the registered editor to pick up off-thread state. No-op if none.
-pub(crate) fn wake_editor() {
-    if let Ok(g) = EDITOR_WAKER.lock() {
-        if let Some(ctx) = g.as_ref() {
-            ctx.request_repaint();
-        }
-    }
-}
-
-/// Claim the oldest pending analysis job (called by a plugin editor).
+/// Claim the oldest *untargeted* analysis job (called by a plugin editor once it
+/// has found nothing addressed to its own instance).
 pub(crate) fn claim_analysis_job() -> Option<AnalysisJob> {
     ANALYSIS_INBOX.lock().ok().and_then(|mut q| q.pop_front())
 }
@@ -88,9 +80,11 @@ pub(crate) fn claim_analysis_job() -> Option<AnalysisJob> {
 
 /// Token the host set for the next instance to be created; taken by `default()`.
 static PENDING_TOKEN: Mutex<Option<u64>> = Mutex::new(None);
-/// `(token, weak engine)` for every host-tagged live instance. Small (one entry
-/// per open editor), pruned of dead entries on every access; a linear scan is fine.
-static INSTANCE_REGISTRY: Mutex<Vec<(u64, Weak<SynthComputeEngine>)>> = Mutex::new(Vec::new());
+/// `(token, weak engine)` for every live instance — `None` token for instances a
+/// plain host created without tagging them. Small (one entry per instance),
+/// pruned of dead entries on every access; a linear scan is fine.
+static INSTANCE_REGISTRY: Mutex<Vec<(Option<u64>, Weak<SynthComputeEngine>)>> =
+    Mutex::new(Vec::new());
 
 /// Record the token the next-created instance should register under.
 pub(crate) fn set_pending_token(token: u64) {
@@ -104,15 +98,14 @@ fn take_pending_token() -> Option<u64> {
     PENDING_TOKEN.lock().ok().and_then(|mut g| g.take())
 }
 
-/// Register a newly created engine under the pending token, if the host set one.
-/// No-op when the plugin is instantiated by a plain host (no token) — e.g. as a
-/// normal VST3 in a DAW.
+/// Register a newly created engine, under the pending token if the host set one.
+/// Instances created by a plain host (no token) are still registered — untagged
+/// — so [`wake_all_editors`] can reach them.
 pub(crate) fn register_new_instance(engine: &Arc<SynthComputeEngine>) {
-    if let Some(token) = take_pending_token() {
-        if let Ok(mut reg) = INSTANCE_REGISTRY.lock() {
-            reg.retain(|(_, w)| w.strong_count() > 0);
-            reg.push((token, Arc::downgrade(engine)));
-        }
+    let token = take_pending_token();
+    if let Ok(mut reg) = INSTANCE_REGISTRY.lock() {
+        reg.retain(|(_, w)| w.strong_count() > 0);
+        reg.push((token, Arc::downgrade(engine)));
     }
 }
 
@@ -121,8 +114,26 @@ fn lookup_instance(token: u64) -> Option<Arc<SynthComputeEngine>> {
     let mut reg = INSTANCE_REGISTRY.lock().ok()?;
     reg.retain(|(_, w)| w.strong_count() > 0);
     reg.iter()
-        .find(|(t, _)| *t == token)
+        .find(|(t, _)| *t == Some(token))
         .and_then(|(_, w)| w.upgrade())
+}
+
+/// Repaint every live instance's editor. Used for events that aren't addressed
+/// to a particular instance (a legacy untargeted push); anything that *is*
+/// addressed should wake only its own editor via
+/// [`SynthComputeEngine::wake_editor`].
+pub(crate) fn wake_all_editors() {
+    let engines: Vec<Arc<SynthComputeEngine>> = match INSTANCE_REGISTRY.lock() {
+        Ok(mut reg) => {
+            reg.retain(|(_, w)| w.strong_count() > 0);
+            reg.iter().filter_map(|(_, w)| w.upgrade()).collect()
+        }
+        Err(_) => return,
+    };
+    // Wake outside the registry lock: `request_repaint` calls into egui.
+    for engine in engines {
+        engine.wake_editor();
+    }
 }
 
 /// Tag the next instance the host creates with `token`, so it can later be
@@ -258,13 +269,63 @@ pub unsafe extern "C" fn lesynth_fourier_import_grid(
     let phase_v: Vec<Vec<f32>> = (0..nh).map(|h| phase[h * nb..(h + 1) * nb].to_vec()).collect();
 
     engine.load_grid(amplitude, phase_v, ratio.to_vec(), base_freq, duration_secs);
-    // Repaint the idle editor so the loaded grid appears immediately.
-    wake_editor();
+    // Repaint that instance's idle editor so the loaded grid appears immediately.
+    engine.wake_editor();
+    0
+}
+
+/// Push a subtrack to be analysed by the instance tagged with `token` (see
+/// [`lesynth_fourier_prepare_instance`]). The job waits in that instance alone,
+/// so it is still there when its editor opens and cannot be swallowed by another
+/// open editor. Returns 0 on success, or a negative value on bad input (-1) or
+/// an unknown/dead token (-2).
+///
+/// `contour`/`contour_len` are the host's per-position fundamental (absolute Hz,
+/// uniformly resampled across the subtrack); pass `null`/`0` for flat (legacy).
+///
+/// # Safety
+/// `samples` must point to `len` valid `f32`s; `contour`, if non-null, to
+/// `contour_len` valid `f32`s.
+#[no_mangle]
+pub unsafe extern "C" fn lesynth_fourier_push_analysis_to(
+    token: u64,
+    samples: *const f32,
+    len: usize,
+    sample_rate: f32,
+    base_freq: f32,
+    contour: *const f32,
+    contour_len: usize,
+) -> i64 {
+    if samples.is_null() || len == 0 {
+        return -1;
+    }
+    let Some(engine) = lookup_instance(token) else {
+        return -2;
+    };
+    let slice = std::slice::from_raw_parts(samples, len);
+    let contour = if contour.is_null() || contour_len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(contour, contour_len).to_vec()
+    };
+    engine.push_analysis_job(AnalysisJob {
+        samples: slice.to_vec(),
+        sample_rate,
+        base_freq,
+        contour,
+    });
+    // Wake only this instance's editor — it is the only one that can claim the
+    // job, and waking the others would just burn frames.
+    engine.wake_editor();
     0
 }
 
 /// Push a subtrack to be analysed by the next available plugin instance.
 /// Returns the new queue depth (0 on invalid input).
+///
+/// **Legacy — prefer [`lesynth_fourier_push_analysis_to`].** The job is not
+/// addressed to any instance, so with several editors open whichever paints
+/// first claims it, and the instance the host meant to fill stays empty.
 ///
 /// `contour`/`contour_len` are the host's per-position fundamental (absolute Hz,
 /// uniformly resampled across the subtrack); pass `null`/`0` for flat (legacy).
@@ -303,8 +364,8 @@ pub unsafe extern "C" fn lesynth_fourier_push_analysis(
         }
         Err(_) => 0,
     };
-    // Wake the idle editor to claim and render the job.
-    wake_editor();
+    // No instance is named, so wake every editor — any of them may claim it.
+    wake_all_editors();
     depth
 }
 
@@ -369,12 +430,27 @@ pub unsafe extern "C" fn lesynth_fourier_analyze(
     nb as i64
 }
 
+/// Serialises tests that touch process-global bridge state — the untargeted
+/// inbox and `PENDING_TOKEN` (where a concurrent `prepare_instance` would
+/// otherwise be claimed by the wrong test's instance). Poison is ignored: a
+/// panicking test shouldn't cascade into unrelated failures.
+#[cfg(test)]
+static GLOBAL_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+fn lock_global_state() -> std::sync::MutexGuard<'static, ()> {
+    GLOBAL_STATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod ffi_tests {
     use super::*;
 
     #[test]
     fn push_analysis_round_trips_contour() {
+        let _guard = lock_global_state();
         let samples = vec![0.1f32, 0.2, 0.3, 0.4];
         let contour = vec![440.0f32, 441.0, 439.0];
 
@@ -424,6 +500,7 @@ mod state_registry_tests {
 
     #[test]
     fn prepare_register_lookup_and_prune() {
+        let _guard = lock_global_state();
         let engine = new_engine();
         lesynth_fourier_prepare_instance(4242);
         register_new_instance(&engine);
@@ -439,6 +516,7 @@ mod state_registry_tests {
 
     #[test]
     fn import_then_export_round_trips_grid() {
+        let _guard = lock_global_state();
         let engine = new_engine();
         let token = 7;
         lesynth_fourier_prepare_instance(token);
@@ -502,6 +580,83 @@ mod state_registry_tests {
         assert_eq!(phase_out, phase_in);
         assert_eq!(ratio_out, ratio_in);
 
+        drop(engine);
+    }
+
+    /// A job pushed for one instance must stay in that instance — a second live
+    /// instance (another open track editor) must not be able to claim it.
+    #[test]
+    fn targeted_push_reaches_only_its_own_instance() {
+        let _guard = lock_global_state();
+        let target = new_engine();
+        let bystander = new_engine();
+        lesynth_fourier_prepare_instance(31);
+        register_new_instance(&target);
+        lesynth_fourier_prepare_instance(32);
+        register_new_instance(&bystander);
+
+        let samples = vec![0.1f32, 0.2, 0.3, 0.4];
+        let contour = vec![440.0f32, 441.0];
+        let rc = unsafe {
+            lesynth_fourier_push_analysis_to(
+                31,
+                samples.as_ptr(),
+                samples.len(),
+                44_100.0,
+                440.0,
+                contour.as_ptr(),
+                contour.len(),
+            )
+        };
+        assert_eq!(rc, 0);
+
+        // The bystander's editor finds nothing — neither in its own mailbox nor
+        // in the untargeted inbox (a targeted push must never land there).
+        assert!(bystander.take_analysis_job().is_none());
+        assert!(claim_analysis_job().is_none());
+
+        let job = target.take_analysis_job().expect("job waits in its instance");
+        assert_eq!(job.samples, samples);
+        assert_eq!(job.contour, contour);
+        assert!(target.take_analysis_job().is_none(), "claimed exactly once");
+
+        drop((target, bystander));
+    }
+
+    #[test]
+    fn targeted_push_rejects_unknown_token_and_bad_input() {
+        let _guard = lock_global_state();
+        let samples = vec![0.1f32, 0.2];
+        let unknown = unsafe {
+            lesynth_fourier_push_analysis_to(
+                654_321,
+                samples.as_ptr(),
+                samples.len(),
+                44_100.0,
+                440.0,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(unknown, -2, "unknown token must not fall back to the inbox");
+        assert!(claim_analysis_job().is_none());
+
+        let engine = new_engine();
+        lesynth_fourier_prepare_instance(33);
+        register_new_instance(&engine);
+        let empty = unsafe {
+            lesynth_fourier_push_analysis_to(
+                33,
+                samples.as_ptr(),
+                0,
+                44_100.0,
+                440.0,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(empty, -1, "empty sample slice is rejected");
+        assert!(engine.take_analysis_job().is_none());
         drop(engine);
     }
 
