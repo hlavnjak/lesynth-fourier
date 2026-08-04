@@ -35,6 +35,12 @@ pub static MAX_OFFSET_AMP: f64 = 1.0;
 pub static MIN_OFFSET_PHASE: f64 = 0.0;
 pub static MAX_OFFSET_PHASE: f64 = 6.28;
 
+/// Per-voice mixdown headroom: each of `n` active voices is scaled by
+/// `VOICE_MIX_SCALING / n` before summing. Named because the Original Pitch And
+/// Gain audition divides it back out — a reproduction of a file must leave the
+/// plugin at that file's level, not 1.9 dB under it.
+pub const VOICE_MIX_SCALING: f32 = 0.8;
+
 // Audio Processing Constants
 pub const TWO_PI: f32 = 2.0 * PI;
 pub const SAMPLE_RATE: f64 = 44100.0;

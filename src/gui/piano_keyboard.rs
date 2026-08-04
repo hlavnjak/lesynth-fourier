@@ -16,7 +16,7 @@ use std::sync::Arc;
 use nih_plug_egui::egui::{Color32, CornerRadius, StrokeKind, Stroke, Vec2, Rect, pos2};
 use crate::constants::NUM_KEYS;
 use crate::engine::SynthComputeEngine;
-use crate::engine::shared_params::BufferState;
+use crate::engine::shared_params::{BufferState, ORIGINAL_PITCH_VOICE};
 use crate::voice::Voice;
 
 fn is_black_key(key_index: usize) -> bool {
@@ -124,6 +124,63 @@ pub fn draw_piano_keyboard(
         let mut repeat = synth_compute_engine.shared_params.repeat_playback();
         if ui.checkbox(&mut repeat, "Repeat").changed() {
             synth_compute_engine.shared_params.set_repeat_playback(repeat);
+        }
+
+        // Audition at the source's own pitch rather than transposed onto a key
+        // — the reference for judging a resynthesis by ear.
+        let has_analysis = *synth_compute_engine
+            .shared_params
+            .analysis_duration_secs
+            .lock()
+            .unwrap()
+            > 0.0;
+        let playing = synth_compute_engine
+            .shared_params
+            .voices
+            .lock()
+            .unwrap()
+            .get(ORIGINAL_PITCH_VOICE)
+            .map(|v| v.as_ref().is_some_and(|v| !v.fade_out_active))
+            .unwrap_or(false);
+        let base_freq = *synth_compute_engine
+            .shared_params
+            .analysis_base_freq
+            .lock()
+            .unwrap();
+
+        let label = if playing {
+            "■ Original Pitch And Gain"
+        } else {
+            "▶ Original Pitch And Gain"
+        };
+        let resp = ui
+            .add_enabled(has_analysis, nih_plug_egui::egui::Button::new(label).small())
+            .on_hover_text(if has_analysis {
+                format!(
+                    "Play the analysed sound at its original pitch ({:.1} Hz) and at the \
+                     source's own level — the reference for comparing a resynthesis by \
+                     ear, A/B-able against the source file directly.",
+                    base_freq
+                )
+            } else {
+                "Analyse some audio first (Analysis mode)".to_string()
+            })
+            .on_disabled_hover_text("Analyse some audio first (Analysis mode)");
+
+        if resp.clicked() {
+            let shared = &synth_compute_engine.shared_params;
+            if playing {
+                // Second click stops it, matching the button's ■ state.
+                if let Some(v) = shared.voices.lock().unwrap()[ORIGINAL_PITCH_VOICE].as_mut() {
+                    v.start_fade_out();
+                }
+            } else {
+                let buf = synth_compute_engine.assemble_buffer_at_original_pitch();
+                if !buf.is_empty() {
+                    shared.voices.lock().unwrap()[ORIGINAL_PITCH_VOICE] = Some(Voice::new(buf));
+                }
+            }
+            synth_compute_engine.update_plotted_mix();
         }
     });
     ui.add_space(5.0);

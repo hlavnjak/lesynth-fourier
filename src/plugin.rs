@@ -22,6 +22,7 @@ use nih_plug_egui::{
 };
 
 use crate::constants::*;
+use crate::engine::shared_params::ORIGINAL_PITCH_VOICE;
 use crate::engine::{ChartType, ExecutionMode, SynthComputeEngine};
 use crate::gui::{draw_analysis_controls, draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_nested_fourier_controls, draw_piano_keyboard, draw_metallic_background, section, section_with_header};
 use crate::params::LeSynthParams;
@@ -151,7 +152,7 @@ impl Plugin for LeSynth {
                 let (voice_gain, master_gain) = if active_count > 0 {
                     let n = active_count as f32;
                     // Each voice gets 1/N scaling to prevent clipping
-                    let voice_scaling = 0.8 / n;  // More conservative base scaling
+                    let voice_scaling = crate::constants::VOICE_MIX_SCALING / n;
                     // Safer loudness compensation that won't exceed ±1.0
                     let loudness_compensation = match active_count {
                         1 => 1.0,   // Single voice: 0.8 * 1.0 = 0.8
@@ -388,11 +389,17 @@ impl Plugin for LeSynth {
                             {
                                 let shared = &synth_compute_engine.shared_params;
                                 let mut voices = shared.voices.lock().unwrap();
-                                for (key_idx, slot) in voices.iter_mut().enumerate() {
+                                for (slot_idx, slot) in voices.iter_mut().enumerate() {
                                     if let Some(v) = slot.as_mut() {
-                                        let buf = synth_compute_engine
-                                            .get_buffer_for_key(key_idx);
-                                        v.buffer = buf;
+                                        // The original-pitch audition slot isn't a
+                                        // key — re-render it at the source's pitch,
+                                        // not from a key buffer.
+                                        v.buffer = if slot_idx == ORIGINAL_PITCH_VOICE {
+                                            synth_compute_engine
+                                                .assemble_buffer_at_original_pitch()
+                                        } else {
+                                            synth_compute_engine.get_buffer_for_key(slot_idx)
+                                        };
                                         // keep current idx and fade states
                                     }
                                 }
