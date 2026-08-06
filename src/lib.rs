@@ -701,8 +701,11 @@ pub unsafe extern "C" fn lesynth_fourier_resynthesize_exact(
         .map(|h| phase[h * num_buckets..(h + 1) * num_buckets].to_vec())
         .collect();
 
+    // Every harmonic enabled: the grid crossing this ABI comes from a file or a
+    // host-side analysis, neither of which carries the editor's per-harmonic
+    // checkboxes.
     let sound = engine::resynthesize_exact(
-        &amplitude, &phase_v, &lens, &dc, &nyq, display_gain, rate_ratio,
+        &amplitude, &phase_v, &lens, &dc, &nyq, &[], &[], display_gain, rate_ratio,
     );
     if !out.is_null() {
         let n = sound.len().min(out_cap);

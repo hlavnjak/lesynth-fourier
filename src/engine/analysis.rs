@@ -600,7 +600,7 @@ mod invertibility_tests {
     fn roundtrip(samples: &[f32], sr: f32, f0: f32, contour: &[f32]) -> Vec<f32> {
         let res = analyze_subtrack(samples, sr, f0, contour, 0, 256, 4000);
         let lens: Vec<usize> = res.bucket_periods.iter().map(|&p| p as usize).collect();
-        resynthesize_exact(&res.amplitude, &res.phase, &lens, &res.dc, &res.nyquist, 0.0, 1.0)
+        resynthesize_exact(&res.amplitude, &res.phase, &lens, &res.dc, &res.nyquist, &[], &[], 0.0, 1.0)
     }
 
     /// The whole point: analysis followed by its inverse *returns* the input —
@@ -736,7 +736,7 @@ mod invertibility_tests {
         assert!(!res.truncated, "grouping should not truncate at this pitch");
         let lens: Vec<usize> = res.bucket_periods.iter().map(|&p| p as usize).collect();
         let rec =
-            resynthesize_exact(&res.amplitude, &res.phase, &lens, &res.dc, &res.nyquist, 0.0, 1.0);
+            resynthesize_exact(&res.amplitude, &res.phase, &lens, &res.dc, &res.nyquist, &[], &[], 0.0, 1.0);
         assert_eq!(rec.len(), samples.len());
         let dev = max_dev(&samples, &rec);
         assert!(dev < 1e-4, "grouped buckets did not round trip: {:.3e} of peak", dev);
@@ -767,7 +767,7 @@ mod invertibility_tests {
 
         let lens: Vec<usize> = res.bucket_periods.iter().map(|&p| p as usize).collect();
         let inverted =
-            resynthesize_exact(&res.amplitude, &res.phase, &lens, &res.dc, &res.nyquist, 0.0, 1.0);
+            resynthesize_exact(&res.amplitude, &res.phase, &lens, &res.dc, &res.nyquist, &[], &[], 0.0, 1.0);
         // The path the gate used to force. `display_gain = 1.0` makes
         // `source_level_scale` undo exactly the clip-safety divisor that
         // `resynthesize_grid` applies, so both renders sit at the source's level
@@ -841,10 +841,10 @@ mod non_harmonic_bin_tests {
             20.0 * e.max(1e-12).log10()
         };
 
-        let full = resynthesize_exact(&res.amplitude, &res.phase, &lens, &res.dc, &res.nyquist, 0.0, 1.0);
-        let no_dc = resynthesize_exact(&res.amplitude, &res.phase, &lens, &[], &res.nyquist, 0.0, 1.0);
-        let no_nyq = resynthesize_exact(&res.amplitude, &res.phase, &lens, &res.dc, &[], 0.0, 1.0);
-        let neither = resynthesize_exact(&res.amplitude, &res.phase, &lens, &[], &[], 0.0, 1.0);
+        let full = resynthesize_exact(&res.amplitude, &res.phase, &lens, &res.dc, &res.nyquist, &[], &[], 0.0, 1.0);
+        let no_dc = resynthesize_exact(&res.amplitude, &res.phase, &lens, &[], &res.nyquist, &[], &[], 0.0, 1.0);
+        let no_nyq = resynthesize_exact(&res.amplitude, &res.phase, &lens, &res.dc, &[], &[], &[], 0.0, 1.0);
+        let neither = resynthesize_exact(&res.amplitude, &res.phase, &lens, &[], &[], &[], &[], 0.0, 1.0);
 
         println!("peak reconstruction error, dB relative to source peak:");
         println!("  harmonics + DC + Nyquist : {:.1} dB", err(&full));
@@ -913,6 +913,8 @@ mod rate_conversion_tests {
                 &lens,
                 &res.dc,
                 &res.nyquist,
+                &[],
+                &[],
                 0.0,
                 out_sr / src_sr,
             );
@@ -956,6 +958,8 @@ mod rate_conversion_tests {
             &lens,
             &res.dc,
             &res.nyquist,
+            &[],
+            &[],
             0.0,
             1.0,
         );

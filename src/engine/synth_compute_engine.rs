@@ -405,7 +405,14 @@ pub fn normalize_grid_per_bucket(grid: &mut [Vec<f32>]) -> f32 {
 /// separate from [`render_key_buffer`], which transposes and therefore must.
 ///
 /// * `dc` / `nyq` – the non-harmonic bins; empty slices omit them (close, not
-///   exact).
+///   exact). The harmonic toggles below do not touch them: they are not
+///   harmonics and the toggle grid does not list them.
+/// * `ampl_enabled` / `phase_enabled` – the per-harmonic checkboxes, indexed by
+///   `harmonic - 1` like the grid rows. A disabled amplitude drops that partial;
+///   a disabled phase renders it at phase 0 — the same meaning they carry in
+///   [`render_key_buffer`], so the audition and the keys agree. An **empty**
+///   slice means "all enabled", for callers with no flags of their own (the host
+///   bridge, tests).
 /// * `display_gain` – divided back out, so the output is at the source's own
 ///   level; `0` keeps the grid's display-normalised level.
 /// * `rate_ratio` – `output_rate / analysis_rate`; `1.0` is the exact case.
@@ -417,6 +424,8 @@ pub fn resynthesize_exact(
     bucket_lengths: &[usize],
     dc: &[f32],
     nyq: &[f32],
+    ampl_enabled: &[bool],
+    phase_enabled: &[bool],
     display_gain: f32,
     rate_ratio: f32,
 ) -> Vec<f32> {
@@ -443,11 +452,19 @@ pub fn resynthesize_exact(
         // `analyze_subtrack` stored.
         let top = ((n - 1) / 2).min(num_harmonics);
         for k in 1..=top {
+            // Empty flags = every harmonic enabled, so `unwrap_or(true)`.
+            if !ampl_enabled.get(k - 1).copied().unwrap_or(true) {
+                continue;
+            }
             let a = amplitude[k - 1][b];
             if a == 0.0 {
                 continue;
             }
-            let ph = phase[k - 1][b];
+            let ph = if phase_enabled.get(k - 1).copied().unwrap_or(true) {
+                phase[k - 1][b]
+            } else {
+                0.0
+            };
             spectrum[k] = Complex { re: 0.5 * a * ph.sin(), im: -0.5 * a * ph.cos() };
         }
         let mut block = fft.make_output_vec();
@@ -1023,12 +1040,19 @@ impl SynthComputeEngine {
                 let dc = self.shared_params.analysis_dc.lock().unwrap();
                 let nyq = self.shared_params.analysis_nyquist.lock().unwrap();
                 let display_gain = *self.shared_params.analysis_display_gain.lock().unwrap();
+                // The per-harmonic checkboxes apply here too: the audition is
+                // what the user judges an edit by, so a harmonic switched off in
+                // the grid has to be absent from it, exactly as it is on a key.
+                let ampl_enabled = self.shared_params.harmonic_ampl_enabled.lock().unwrap();
+                let phase_enabled = self.shared_params.harmonic_phase_enabled.lock().unwrap();
                 let mut sound = resynthesize_exact(
                     &amp,
                     &phase,
                     &lengths,
                     &dc,
                     &nyq,
+                    &ampl_enabled,
+                    &phase_enabled,
                     display_gain,
                     sample_rate / analysis_rate,
                 );
@@ -2436,6 +2460,82 @@ mod tests {
         assert!(
             db < -80.0,
             "at {device_sr} Hz the audition is {db:.1} dB from the source"
+        );
+    }
+
+    /// A harmonic switched off in the grid must be absent from the audition.
+    /// The exact-inverse path ignored the checkboxes — only the transposing
+    /// renderer read them — so the button played harmonics the editor showed as
+    /// disabled. `tone` carries harmonics 1-3, so each one is measurable on its
+    /// own.
+    #[test]
+    fn original_pitch_audition_honours_the_harmonic_toggles() {
+        let engine = create_test_engine();
+        let sr = 44_100.0;
+        let f = 220.0;
+        // Like `tone`, but harmonic 2 sits at a phase of its own: buckets start
+        // on a period boundary, so a source built from bare sines stores φ ≈ 0
+        // everywhere and the phase toggle would have nothing to change.
+        let src: Vec<f32> = {
+            let n = (sr * 0.4) as usize;
+            (0..n)
+                .map(|i| {
+                    let w = 2.0 * std::f32::consts::PI * f * i as f32 / sr;
+                    0.6 * w.sin() + 0.3 * (2.0 * w + 1.2).sin() + 0.15 * (3.0 * w).sin()
+                })
+                .collect()
+        };
+        engine.shared_params.update_sample_rate(sr);
+        engine.analyze_and_load(&src, sr, f, &[], 0);
+
+        // Magnitude at `k·f`, correlated over a whole number of cycles so the
+        // partials next door do not leak into the measurement.
+        let level = |buf: &[f32], k: f64| -> f64 {
+            let cycles = (buf.len() as f64 * k * f as f64 / sr as f64).floor();
+            let n = (cycles * sr as f64 / (k * f as f64)).round() as usize;
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, &v) in buf[..n.min(buf.len())].iter().enumerate() {
+                let w = 2.0 * std::f64::consts::PI * k * f as f64 * i as f64 / sr as f64;
+                re += v as f64 * w.cos();
+                im -= v as f64 * w.sin();
+            }
+            2.0 * (re * re + im * im).sqrt() / n as f64
+        };
+
+        let full = engine.assemble_buffer_at_original_pitch();
+        assert!(!full.is_empty(), "the audition must render at all");
+
+        engine.shared_params.harmonic_ampl_enabled.lock().unwrap()[1] = false;
+        let muted = engine.assemble_buffer_at_original_pitch();
+
+        let db = 20.0 * (level(&muted, 2.0) / level(&full, 2.0)).log10();
+        assert!(db < -40.0, "harmonic 2 is still audible when disabled: {db:.1} dB");
+        // Its neighbours are untouched — the toggle silences one row, not a band.
+        for k in [1.0, 3.0] {
+            let kept = 20.0 * (level(&muted, k) / level(&full, k)).log10();
+            assert!(
+                kept.abs() < 0.5,
+                "disabling harmonic 2 moved harmonic {k} by {kept:+.2} dB"
+            );
+        }
+
+        // The phase toggle is the other half of the requirement: it renders the
+        // harmonic at phase 0, so the waveform changes while the level does not.
+        engine.shared_params.harmonic_ampl_enabled.lock().unwrap()[1] = true;
+        engine.shared_params.harmonic_phase_enabled.lock().unwrap()[1] = false;
+        let flat = engine.assemble_buffer_at_original_pitch();
+        let moved = flat
+            .iter()
+            .zip(&full)
+            .fold(0.0f32, |m, (&a, &b)| m.max((a - b).abs()));
+        assert!(
+            moved > 0.01 * max_abs(&full),
+            "disabling harmonic 2's phase changed nothing"
+        );
+        let kept = 20.0 * (level(&flat, 2.0) / level(&full, 2.0)).log10();
+        assert!(
+            kept.abs() < 0.5,
+            "zeroing a phase must not change its level: {kept:+.2} dB"
         );
     }
 
