@@ -116,7 +116,10 @@ pub fn draw_piano_keyboard(
 
     // Draw status label above keyboard, shifted down by y_offset
     ui.add_space(y_offset);
-    ui.horizontal(|ui| {
+    // Wrapped, because the row carries the audition button's caption as well as
+    // the status text: a narrow window has to fold it onto a second line rather
+    // than clip it.
+    ui.horizontal_wrapped(|ui| {
         ui.add_space(10.0);
         ui.colored_label(status_color, &status_text);
         ui.separator();
@@ -159,13 +162,27 @@ pub fn draw_piano_keyboard(
                 format!(
                     "Play the analysed sound at its original pitch ({:.1} Hz) and at the \
                      source's own level — the reference for comparing a resynthesis by \
-                     ear, A/B-able against the source file directly.",
+                     ear, A/B-able against the source file directly.\n\n\
+                     It also keeps the original pitch *per bucket*: every bucket sounds \
+                     at the pitch it was analysed at, so the source's own vibrato, \
+                     glide and drift survive. A key on the keyboard instead plays every \
+                     bucket at one constant pitch — the key's — which is what the pitch \
+                     contour is traded away for when the sound is transposed.",
                     base_freq
                 )
             } else {
                 "Analyse some audio first (Analysis mode)".to_string()
             })
             .on_disabled_hover_text("Analyse some audio first (Analysis mode)");
+        // Caption: the difference from a key is not guessable from the button's
+        // name, and it is the reason to reach for this button at all.
+        ui.label(
+            nih_plug_egui::egui::RichText::new(
+                "keeps each bucket's original pitch — a key plays one constant pitch",
+            )
+            .small()
+            .color(Color32::from_gray(140)),
+        );
 
         if resp.clicked() {
             let shared = &synth_compute_engine.shared_params;
