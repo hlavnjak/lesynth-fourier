@@ -1001,7 +1001,13 @@ impl SynthComputeEngine {
     pub fn assemble_buffer_for_key(&self, key: usize) -> Vec<f32> {
         let base_period = self.shared_params.piano_periods.lock().unwrap()[key];
         // Cap the harmonics this key can carry without aliasing.
-        self.assemble_buffer_with_period(base_period, max_harmonic_for_key(key))
+        self.assemble_buffer_with_period(
+            base_period,
+            max_harmonic_for_key(key),
+            // A key transposes, so the analysed phases no longer close the cycle
+            // (see `SharedParams::zero_key_phases`).
+            self.shared_params.zero_key_phases(),
+        )
     }
 
     /// Render the grid at the source's own pitch **and its own level** — the
@@ -1074,7 +1080,10 @@ impl SynthComputeEngine {
         // Only the Nyquist limit applies here — the anti-alias cap is a
         // per-*key* quantity and there is no key involved. `render_key_buffer`
         // still clamps to `period / 2`, which is exactly that limit.
-        let mut sound = self.assemble_buffer_with_period(base_period.max(2.0), NUM_HARMONICS);
+        // `zero_phases: false` — this is the source's own pitch, where the
+        // analysed phases are exactly right and are the point of the audition.
+        let mut sound =
+            self.assemble_buffer_with_period(base_period.max(2.0), NUM_HARMONICS, false);
         // Read the divisor *after* rendering: `assemble_buffer_with_period`
         // re-normalises first when the grid changed, and it is that render's
         // divisor we have to undo.
@@ -1094,7 +1103,16 @@ impl SynthComputeEngine {
     /// Shared body of the synchronous render paths: normalise if needed, then
     /// render the live grid at `base_period` with `max_harmonic` as the
     /// anti-alias cap.
-    fn assemble_buffer_with_period(&self, base_period: f32, max_harmonic: usize) -> Vec<f32> {
+    ///
+    /// `zero_phases` renders every bucket as if its phases were zero — the
+    /// keyboard's cycle-continuity switch, see
+    /// [`SharedParams::zero_key_phases`](crate::engine::shared_params::SharedParams::zero_key_phases).
+    fn assemble_buffer_with_period(
+        &self,
+        base_period: f32,
+        max_harmonic: usize,
+        zero_phases: bool,
+    ) -> Vec<f32> {
         let start_time = std::time::Instant::now();
 
         if *self.shared_params.normalization_needed.lock().unwrap() {
@@ -1112,6 +1130,15 @@ impl SynthComputeEngine {
         // sample, making large analysis buffers crawl.
         let harmonic_ampl_enabled = self.shared_params.harmonic_ampl_enabled.lock().unwrap();
         let harmonic_phase_enabled = self.shared_params.harmonic_phase_enabled.lock().unwrap();
+        // Zeroing the phases *is* switching every harmonic's phase off: the
+        // renderer already substitutes 0.0 for a disabled harmonic's phase, on
+        // both its direct-sum and inverse-FFT paths.
+        let all_phases_off = vec![false; harmonic_phase_enabled.len()];
+        let phase_enabled: &[bool] = if zero_phases {
+            &all_phases_off
+        } else {
+            &harmonic_phase_enabled
+        };
 
         // Synth mode: one period per bucket. Analysis mode: the source duration.
         let target_samples = target_samples_for(&self.shared_params);
@@ -1121,7 +1148,7 @@ impl SynthComputeEngine {
             &ampl_data_normalized,
             &phase_data,
             &harmonic_ampl_enabled,
-            &harmonic_phase_enabled,
+            phase_enabled,
             base_period,
             max_harmonic,
             &pitch_ratio,
@@ -1315,7 +1342,14 @@ impl SynthComputeEngine {
             let ampl_data_copy: Vec<Vec<f32>> = ampl_data_normalized.clone();
             let phase_data_copy: Vec<Vec<f32>> = phase_data.clone();
             let harmonic_ampl_enabled_copy: Vec<bool> = harmonic_ampl_enabled.clone();
-            let harmonic_phase_enabled_copy: Vec<bool> = harmonic_phase_enabled.clone();
+            // This is a key, so the "zero the phases" switch applies (see
+            // `SharedParams::zero_key_phases`); switching every harmonic's phase
+            // off is how the renderer is told to use 0.0 for all of them.
+            let harmonic_phase_enabled_copy: Vec<bool> = if shared_params.zero_key_phases() {
+                vec![false; harmonic_phase_enabled.len()]
+            } else {
+                harmonic_phase_enabled.clone()
+            };
             // Per-bucket vibrato ratios (Analysis mode only; empty → flat).
             let pitch_ratio = bucket_pitch_ratios(shared_params);
             // Synth mode: one period per bucket. Analysis mode: source duration.
@@ -1469,6 +1503,13 @@ impl SynthComputeEngine {
             *self.shared_params.analysis_nyquist.lock().unwrap() =
                 if exact { result.nyquist.clone() } else { Vec::new() };
         }
+
+        // An analysed grid arrives with the source's own phases, which only close
+        // the cycle at the source's own pitch — so a fresh grid starts with the
+        // keyboard's phases zeroed. The checkbox next to Original Pitch And Gain
+        // takes it from here; a new grid resets it, the same way it resets the
+        // per-harmonic "custom" overrides above.
+        self.shared_params.set_zero_key_phases(true);
 
         self.set_normalization_needed(true);
         self.shared_params.mark_all_buffers_dirty();
@@ -2274,6 +2315,11 @@ mod tests {
         let f = 220.0;
         let samples = tone(sr, f, 0.4);
         engine.analyze_and_load(&samples, sr, f, &[], 0);
+        // The bridge renders the grid as given, so compare against the key path
+        // reading the same phases: `analyze_and_load` starts a loaded grid with
+        // the keyboard's phases zeroed (`zero_key_phases`), and the bridge has no
+        // such switch.
+        engine.shared_params.set_zero_key_phases(false);
 
         let key = 40;
         let via_engine = engine.assemble_buffer_for_key(key);
@@ -2536,6 +2582,129 @@ mod tests {
         assert!(
             kept.abs() < 0.5,
             "zeroing a phase must not change its level: {kept:+.2} dB"
+        );
+    }
+
+    /// Load a one-harmonic grid whose phase alternates between buckets — the
+    /// shape that steps at a period border, since a bucket's waveform is
+    /// periodic and can only break where the phase *changes*.
+    fn engine_with_alternating_phase(buckets: usize) -> SynthComputeEngine {
+        let engine = create_test_engine();
+        engine.shared_params.update_sample_rate(44_100.0);
+        let amplitude = vec![vec![0.5f32; buckets]];
+        let phase = vec![(0..buckets)
+            .map(|b| if b % 2 == 0 { 0.0 } else { std::f32::consts::FRAC_PI_2 })
+            .collect()];
+        engine.load_grid(
+            amplitude,
+            phase,
+            vec![1.0; buckets],
+            220.0,
+            0.2,
+            44_100.0,
+            0.9,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        engine
+    }
+
+    /// Largest jump between neighbouring samples — a period border that does not
+    /// join shows up here and nowhere else.
+    fn max_step(buf: &[f32]) -> f32 {
+        buf.windows(2).fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()))
+    }
+
+    /// The point of the switch: with the phases kept, a key steps at every
+    /// bucket change; with them zeroed every harmonic is a sine of the
+    /// fundamental, zero at both ends of the cycle, so the periods join.
+    #[test]
+    fn zeroing_key_phases_joins_the_period_borders() {
+        let engine = engine_with_alternating_phase(16);
+        let key = 24; // 110 Hz, ~401 samples per period at 44.1 kHz
+
+        engine.shared_params.set_zero_key_phases(false);
+        let stepped = engine.assemble_buffer_for_key(key);
+        assert!(!stepped.is_empty(), "the key must render at all");
+        let jump = max_step(&stepped);
+
+        engine.shared_params.set_zero_key_phases(true);
+        let joined = engine.assemble_buffer_for_key(key);
+        let smooth = max_step(&joined);
+
+        // A 0.5-amplitude fundamental at ~401 samples per period moves ~0.008 per
+        // sample; the phase change is worth ~0.5, i.e. two orders of magnitude.
+        assert!(
+            jump > 0.3,
+            "the phased render should step at the bucket changes, but its worst \
+             step is only {jump:.4}"
+        );
+        assert!(
+            smooth < 0.05,
+            "zeroed phases must leave no step at a period border: {smooth:.4}"
+        );
+        // Same spectrum, so the note is still there at the same level.
+        assert!(
+            (max_abs(&joined) - max_abs(&stepped)).abs() < 0.05,
+            "zeroing the phases must not change the level"
+        );
+    }
+
+    /// The switch belongs to the keyboard alone: Original Pitch And Gain plays at
+    /// the pitch the phases were measured at, where they are exactly right.
+    #[test]
+    fn zeroing_key_phases_leaves_the_original_pitch_audition_alone() {
+        let engine = create_test_engine();
+        let sr = 44_100.0;
+        let f = 220.0;
+        let src: Vec<f32> = {
+            let n = (sr * 0.3) as usize;
+            (0..n)
+                .map(|i| {
+                    let w = TWO_PI * f * i as f32 / sr;
+                    0.6 * w.sin() + 0.3 * (2.0 * w + 1.2).sin()
+                })
+                .collect()
+        };
+        engine.shared_params.update_sample_rate(sr);
+        engine.analyze_and_load(&src, sr, f, &[], 0);
+
+        engine.shared_params.set_zero_key_phases(false);
+        let kept = engine.assemble_buffer_at_original_pitch();
+        engine.shared_params.set_zero_key_phases(true);
+        let zeroed = engine.assemble_buffer_at_original_pitch();
+        assert!(!kept.is_empty(), "the audition must render at all");
+        assert_eq!(kept.len(), zeroed.len());
+        assert!(
+            kept.iter().zip(&zeroed).all(|(a, b)| a == b),
+            "the audition must be untouched by the keyboard's phase switch"
+        );
+    }
+
+    /// A grid analysed from audio (or imported from a `.lsft`) carries phases
+    /// that only close the cycle at its own pitch, so the switch starts on;
+    /// a hand-built Synth patch keeps its phases, which are the patch.
+    #[test]
+    fn zero_key_phases_defaults_on_for_a_loaded_grid() {
+        let fresh = create_test_engine();
+        assert!(
+            !fresh.shared_params.zero_key_phases(),
+            "a fresh Synth instance must keep its phases"
+        );
+
+        let imported = engine_with_alternating_phase(8);
+        assert!(
+            imported.shared_params.zero_key_phases(),
+            "an imported grid must start with the keyboard's phases zeroed"
+        );
+
+        let analysed = create_test_engine();
+        analysed.shared_params.update_sample_rate(44_100.0);
+        analysed.analyze_and_load(&tone(44_100.0, 220.0, 0.2), 44_100.0, 220.0, &[], 0);
+        assert!(
+            analysed.shared_params.zero_key_phases(),
+            "an analysed grid must start with the keyboard's phases zeroed"
         );
     }
 

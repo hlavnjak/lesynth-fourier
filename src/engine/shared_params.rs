@@ -116,6 +116,11 @@ pub struct SharedParams {
 
     /// When true a held note loops its buffer; when false it plays once.
     pub repeat_playback: Arc<AtomicBool>,
+
+    /// When true, every bucket's phases are treated as zero while rendering a
+    /// *keyboard* note. Set on loading an analysed grid; see
+    /// [`zero_key_phases`](Self::zero_key_phases).
+    pub zero_key_phases: Arc<AtomicBool>,
 }
 
 impl SharedParams {
@@ -160,6 +165,10 @@ impl SharedParams {
 
             // Default to looping a held note, matching prior behaviour.
             repeat_playback: Arc::new(AtomicBool::new(true)),
+
+            // Off for a hand-built Synth patch, whose phases are the patch;
+            // switched on when an analysed grid is loaded (`load_analysis`).
+            zero_key_phases: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -171,6 +180,27 @@ impl SharedParams {
     /// Set whether a held note loops its buffer.
     pub fn set_repeat_playback(&self, repeat: bool) {
         self.repeat_playback.store(repeat, Ordering::Relaxed);
+    }
+
+    /// Whether a *keyboard* note renders every bucket with zero phase.
+    ///
+    /// A bucket is one period, and its phases are the ones the source had at its
+    /// own pitch. Played on a key the period is a different length, so the
+    /// waveform no longer meets itself at the cycle boundary and every bucket
+    /// change steps the signal — an audible click/clip at the period borders.
+    /// Zeroing the phases makes every harmonic a sine of the fundamental, which
+    /// is zero at both ends of the cycle, so consecutive buckets join
+    /// continuously. It costs the source's waveform shape, not its spectrum.
+    ///
+    /// Never applied to the Original Pitch And Gain audition, which plays at the
+    /// pitch the phases belong to and must stay an exact reproduction.
+    pub fn zero_key_phases(&self) -> bool {
+        self.zero_key_phases.load(Ordering::Relaxed)
+    }
+
+    /// Set whether a keyboard note renders with all phases zeroed.
+    pub fn set_zero_key_phases(&self, zero: bool) {
+        self.zero_key_phases.store(zero, Ordering::Relaxed);
     }
 
     /// Current execution mode.

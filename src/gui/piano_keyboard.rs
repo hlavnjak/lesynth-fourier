@@ -184,6 +184,35 @@ pub fn draw_piano_keyboard(
             .color(Color32::from_gray(140)),
         );
 
+        // Sits next to the audition button because it is the other half of the
+        // same trade-off: the audition keeps the phases, a key cannot. Separated
+        // so it does not read as a second caption for the button.
+        ui.separator();
+        let mut zero_phases = synth_compute_engine.shared_params.zero_key_phases();
+        let zero_resp = ui
+            .checkbox(&mut zero_phases, "Zero phases on keys")
+            .on_hover_text(
+                "Render notes played from the keyboard (and the assembled-sound \
+                 chart) with every bucket's phases set to zero.\n\n\
+                 A bucket is one period, and its phases are the ones the source \
+                 had at *its* pitch. On a key the period is a different length, \
+                 so the waveform no longer meets itself at the cycle boundary \
+                 and each bucket change steps the signal — the clipping heard at \
+                 the period borders. With the phases zeroed every harmonic is a \
+                 sine of the fundamental, zero at both ends of the cycle, so the \
+                 periods join cleanly. The spectrum is unchanged; the source's \
+                 waveform shape is not preserved.\n\n\
+                 Never affects Original Pitch And Gain, which plays at the pitch \
+                 the phases belong to. On by default for an analysed grid.",
+            );
+        if zero_resp.changed() {
+            let shared = &synth_compute_engine.shared_params;
+            shared.set_zero_key_phases(zero_phases);
+            // Every key buffer was rendered with the old setting.
+            shared.mark_all_buffers_dirty();
+            synth_compute_engine.update_assembled_chart_with_key24();
+        }
+
         if resp.clicked() {
             let shared = &synth_compute_engine.shared_params;
             if playing {
