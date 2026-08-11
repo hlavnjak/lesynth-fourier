@@ -203,7 +203,7 @@ pub fn draw_piano_keyboard(
                  periods join cleanly. The spectrum is unchanged; the source's \
                  waveform shape is not preserved.\n\n\
                  Never affects Original Pitch And Gain, which plays at the pitch \
-                 the phases belong to. On by default for an analysed grid.",
+                 the phases belong to.",
             );
         if zero_resp.changed() {
             let shared = &synth_compute_engine.shared_params;

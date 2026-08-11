@@ -1504,13 +1504,6 @@ impl SynthComputeEngine {
                 if exact { result.nyquist.clone() } else { Vec::new() };
         }
 
-        // An analysed grid arrives with the source's own phases, which only close
-        // the cycle at the source's own pitch — so a fresh grid starts with the
-        // keyboard's phases zeroed. The checkbox next to Original Pitch And Gain
-        // takes it from here; a new grid resets it, the same way it resets the
-        // per-harmonic "custom" overrides above.
-        self.shared_params.set_zero_key_phases(true);
-
         self.set_normalization_needed(true);
         self.shared_params.mark_all_buffers_dirty();
         self.update_assembled_chart_with_key24();
@@ -2315,11 +2308,6 @@ mod tests {
         let f = 220.0;
         let samples = tone(sr, f, 0.4);
         engine.analyze_and_load(&samples, sr, f, &[], 0);
-        // The bridge renders the grid as given, so compare against the key path
-        // reading the same phases: `analyze_and_load` starts a loaded grid with
-        // the keyboard's phases zeroed (`zero_key_phases`), and the bridge has no
-        // such switch.
-        engine.shared_params.set_zero_key_phases(false);
 
         let key = 40;
         let via_engine = engine.assemble_buffer_for_key(key);
@@ -2682,11 +2670,10 @@ mod tests {
         );
     }
 
-    /// A grid analysed from audio (or imported from a `.lsft`) carries phases
-    /// that only close the cycle at its own pitch, so the switch starts on;
-    /// a hand-built Synth patch keeps its phases, which are the patch.
+    /// The switch is off until the user asks for it, in every mode — loading a
+    /// grid must not silently change how the keyboard sounds.
     #[test]
-    fn zero_key_phases_defaults_on_for_a_loaded_grid() {
+    fn zero_key_phases_defaults_off_everywhere() {
         let fresh = create_test_engine();
         assert!(
             !fresh.shared_params.zero_key_phases(),
@@ -2695,16 +2682,25 @@ mod tests {
 
         let imported = engine_with_alternating_phase(8);
         assert!(
-            imported.shared_params.zero_key_phases(),
-            "an imported grid must start with the keyboard's phases zeroed"
+            !imported.shared_params.zero_key_phases(),
+            "importing a grid must not switch the phases off"
         );
 
         let analysed = create_test_engine();
         analysed.shared_params.update_sample_rate(44_100.0);
         analysed.analyze_and_load(&tone(44_100.0, 220.0, 0.2), 44_100.0, 220.0, &[], 0);
         assert!(
+            !analysed.shared_params.zero_key_phases(),
+            "analysing audio must not switch the phases off"
+        );
+
+        // And a grid loaded while it is on leaves it on — it is the user's
+        // setting, not a property of the grid.
+        analysed.shared_params.set_zero_key_phases(true);
+        analysed.analyze_and_load(&tone(44_100.0, 330.0, 0.2), 44_100.0, 330.0, &[], 0);
+        assert!(
             analysed.shared_params.zero_key_phases(),
-            "an analysed grid must start with the keyboard's phases zeroed"
+            "loading a grid must not undo the user's choice"
         );
     }
 

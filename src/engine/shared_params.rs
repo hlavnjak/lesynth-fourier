@@ -118,7 +118,7 @@ pub struct SharedParams {
     pub repeat_playback: Arc<AtomicBool>,
 
     /// When true, every bucket's phases are treated as zero while rendering a
-    /// *keyboard* note. Set on loading an analysed grid; see
+    /// *keyboard* note. Off unless the user asks for it; see
     /// [`zero_key_phases`](Self::zero_key_phases).
     pub zero_key_phases: Arc<AtomicBool>,
 }
@@ -166,8 +166,9 @@ impl SharedParams {
             // Default to looping a held note, matching prior behaviour.
             repeat_playback: Arc::new(AtomicBool::new(true)),
 
-            // Off for a hand-built Synth patch, whose phases are the patch;
-            // switched on when an analysed grid is loaded (`load_analysis`).
+            // Always off to begin with, in every mode: keeping the phases is
+            // what the grid says, and loading one must not silently change how
+            // it sounds. The checkbox next to Original Pitch And Gain turns it on.
             zero_key_phases: Arc::new(AtomicBool::new(false)),
         }
     }
