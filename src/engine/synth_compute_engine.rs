@@ -349,7 +349,10 @@ fn render_key_buffer(
         .fold(f32::INFINITY, f32::min);
     let max_h = num_harmonics
         .min(max_harmonic)
-        .min((min_period * 0.5).floor() as usize);
+        .min((min_period * 0.5).floor() as usize)
+        // Never synthesise past what the source carries: above that the grid
+        // holds fitted noise, and rendering noise periodically makes it a tone.
+        .min(timing.map(|t| t.usable_harmonics).unwrap_or(usize::MAX));
 
     // With the source's own periods in hand, synthesise pitch-synchronously:
     // one grain per output period, overlapped at the boundaries. The
@@ -635,6 +638,8 @@ struct BucketTiming<'a> {
     dc: &'a [f32],
     /// Each bucket's baked phase origin — see [`PlaybackGrid::rotations`].
     rotations: &'a [f32],
+    /// The source's own bandwidth — see [`PlaybackGrid::usable_harmonics`].
+    usable_harmonics: usize,
 }
 
 impl BucketTiming<'_> {
@@ -886,6 +891,17 @@ pub struct PlaybackGrid {
     pub periods: Vec<f32>,
     /// The bucket's wall-clock span, in source samples: its recorded length.
     pub spans: Vec<f32>,
+    /// The highest harmonic the *source* actually carries.
+    ///
+    /// Above a recording's own bandwidth there is only noise, and the analysis
+    /// fits it into harmonics like anything else. One period of noise rendered
+    /// as a periodic waveform is not noise any more: it repeats identically
+    /// every cycle and adds coherently into a stable comb at the top of the
+    /// band, which is heard as a fizz that no amount of work on the renderer can
+    /// remove. On my_voice.m4a — lossy, so lowpassed at 9 kHz — the render sat
+    /// **16 dB above** a true transposition between 10 and 11.4 kHz, in a band
+    /// where the source is 107 dB down.
+    pub usable_harmonics: usize,
     /// The phase origin baked into this bucket's phases: the fractional part of
     /// how many fundamental cycles the source had run when the bucket starts.
     ///
@@ -989,6 +1005,28 @@ pub fn build_playback_grid(
         start += lengths[b] as f64;
     }
 
+    // Where the source's own spectrum ends. A recording rolls off smoothly or
+    // falls off a cliff (a codec's lowpass); either way the last harmonic that
+    // carries signal is the last one whose mean rises above a floor far below
+    // the loudest. 60 dB is deep enough to keep a natural rolloff and shallow
+    // enough to catch a cliff.
+    let mut mean = vec![0.0f32; num_harmonics];
+    for (n, m) in mean.iter_mut().enumerate() {
+        *m = out_amp[n].iter().copied().sum::<f32>() / nb as f32;
+    }
+    let floor = mean.iter().copied().fold(0.0f32, f32::max) * 1e-3;
+    // Keep a few harmonics past the edge. A real top harmonic leaks into its
+    // neighbours, and cutting flush loses part of it — worth 10 dB against an
+    // analytic ideal on a 12-harmonic tone. The noise band this exists to
+    // remove is tens of harmonics wide, so a small margin costs nothing there.
+    const BANDWIDTH_MARGIN: usize = 4;
+    let usable_harmonics = mean
+        .iter()
+        .rposition(|&m| m > floor)
+        .map(|i| i + 1 + BANDWIDTH_MARGIN)
+        .unwrap_or(num_harmonics)
+        .clamp(1, num_harmonics);
+
     let divisor = normalize_grid_per_bucket(&mut out_amp);
     if divisor > 0.0 {
         for v in out_dc.iter_mut() {
@@ -1002,6 +1040,7 @@ pub fn build_playback_grid(
         periods,
         spans: lengths.iter().map(|&l| l as f32).collect(),
         rotations,
+        usable_harmonics,
         norm_divisor: divisor,
     })
 }
@@ -1273,6 +1312,7 @@ pub fn resynthesize_key(
             spans: &spans,
             dc: &grid.dc,
             rotations: &grid.rotations,
+            usable_harmonics: grid.usable_harmonics,
         }),
         target_samples,
         None,
@@ -1862,6 +1902,7 @@ impl SynthComputeEngine {
                 spans: s,
                 dc: &g.dc,
                 rotations: &g.rotations,
+                usable_harmonics: g.usable_harmonics,
             }).as_ref(),
             target_samples,
             None,
@@ -2100,6 +2141,7 @@ impl SynthComputeEngine {
                 spans: s,
                 dc: &g.dc,
                 rotations: &g.rotations,
+                usable_harmonics: g.usable_harmonics,
             }).as_ref(),
             target_samples,
             Some(&shared_params.computation_cancel),
@@ -3676,7 +3718,13 @@ mod keyboard_fidelity {
         let enabled = vec![true; grid.amplitude.len()];
         let ratios = engine.shared_params.bucket_pitch_ratio.lock().unwrap().clone();
         let timing =
-            BucketTiming { periods: &periods, spans: &spans, dc: &grid.dc, rotations: &grid.rotations };
+            BucketTiming {
+                periods: &periods,
+                spans: &spans,
+                dc: &grid.dc,
+                rotations: &grid.rotations,
+                usable_harmonics: grid.usable_harmonics,
+            };
 
         // target_samples = 0: the Synth timeline, one cycle per bucket.
         let with_timing = render_key_buffer(
@@ -3774,6 +3822,25 @@ mod keyboard_fidelity {
             "at the source's own pitch the render is {mean:.1} dB from it even with the \
              alignment fitted out — that is distortion, not drift"
         );
+    }
+
+    /// What bandwidth the grid reports for a source of known extent.
+    #[test]
+    fn the_usable_bandwidth_matches_the_source() {
+        for (f0, harmonics) in [(440.0f32, 12usize), (110.0, 12)] {
+            let sr = 44_100.0f32;
+            let (engine, _src) = analysed(sr, f0, 0.0);
+            let grid = playback_grid(&engine.shared_params).expect("analysed");
+            println!(
+                "source {f0} Hz with {harmonics} harmonics -> usable_harmonics {}",
+                grid.usable_harmonics
+            );
+            assert!(
+                grid.usable_harmonics >= harmonics,
+                "the source carries {harmonics} harmonics but only {} were kept",
+                grid.usable_harmonics
+            );
+        }
     }
 
     /// Do the true periods still tile the source? `true_periods` fits the
