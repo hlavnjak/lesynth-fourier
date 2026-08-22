@@ -19,5 +19,7 @@ pub mod chart_type;
 
 pub use analysis::{analyze_subtrack, normalize_for_display, AnalysisResult, ExecutionMode};
 pub use shared_params::SharedParams;
-pub use synth_compute_engine::{resynthesize_exact, resynthesize_grid, SynthComputeEngine};
+pub use synth_compute_engine::{
+    resynthesize_exact, resynthesize_grid, PlaybackGrid, SynthComputeEngine,
+};
 pub use chart_type::ChartType;
