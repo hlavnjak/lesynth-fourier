@@ -80,68 +80,6 @@ fn bucket_period(base_period: f32, ratios: &[f32], bucket: usize) -> f32 {
     (base_period / r.max(1e-3)).max(2.0)
 }
 
-/// The [`PlaybackGrid`] for the live analysis, built on demand and cached until
-/// the grid changes.
-///
-/// `None` outside Analysis mode, and for any grid the analysis did not record
-/// bucket lengths for (hand-drawn, or a `.lsft` from before version 3) — those
-/// keep transposing from the stored grid and the pitch contour, as before.
-fn playback_grid(shared_params: &SharedParams) -> Option<Arc<PlaybackGrid>> {
-    if shared_params.execution_mode() != ExecutionMode::Analysis {
-        return None;
-    }
-    // One lock for the whole check-and-build, so two keys starting at once
-    // cannot both pay for the transform.
-    let mut cached = shared_params.playback_grid.lock().unwrap();
-    if !shared_params.playback_grid_dirty.swap(false, Ordering::Relaxed) {
-        if let Some(grid) = cached.as_ref() {
-            return Some(grid.clone());
-        }
-    }
-    let built = build_playback_grid(
-        &shared_params.amplitude_data.lock().unwrap(),
-        &shared_params.phase_data.lock().unwrap(),
-        &shared_params.analysis_bucket_lengths.lock().unwrap(),
-        &shared_params.analysis_dc.lock().unwrap(),
-        &shared_params.analysis_nyquist.lock().unwrap(),
-        &shared_params.bucket_pitch_ratio.lock().unwrap(),
-    )
-    .map(Arc::new);
-    *cached = built.clone();
-    built
-}
-
-/// This key's clocks over `grid`, in output samples: how long one cycle of each
-/// bucket lasts (the pitch) and how long the bucket itself lasts (the source's
-/// own duration, the same on every key).
-///
-/// `base_period` is the key's period and `nominal` the source's, both in their
-/// own rate's samples, so their ratio is the transposition.
-fn key_timing(
-    grid: &PlaybackGrid,
-    shared_params: &SharedParams,
-    base_period: f32,
-) -> Option<(Vec<f32>, Vec<f32>)> {
-    let base_freq = *shared_params.analysis_base_freq.lock().unwrap();
-    let analysis_rate = *shared_params.analysis_sample_rate.lock().unwrap();
-    let out_rate = *shared_params.sample_rate.lock().unwrap();
-    if base_freq <= 0.0 || analysis_rate <= 0.0 || out_rate <= 0.0 {
-        return None;
-    }
-    let nominal = analysis_rate / base_freq;
-    if !(nominal >= 2.0) {
-        return None;
-    }
-    let rate = out_rate / analysis_rate;
-    let periods = grid
-        .periods
-        .iter()
-        .map(|&t| (base_period * t / nominal).max(2.0))
-        .collect();
-    let spans = grid.spans.iter().map(|&l| (l * rate).max(1.0)).collect();
-    Some((periods, spans))
-}
-
 /// Above this many harmonics, switch from the direct sinusoid sum to a cycle
 /// table (one inverse FFT per bucket). Below it the direct sum is both cheaper
 /// and exact.
@@ -158,13 +96,16 @@ const CYCLE_TABLE_MAX: usize = 1 << 13;
 
 /// Inverse-FFT plans for the fast path, cached by length: one bank per
 /// [`render_key_buffer`] call, shared across that key's buckets.
-#[derive(Default)]
 struct IfftBank {
     planner: RealFftPlanner<f32>,
     plans: HashMap<usize, Arc<dyn ComplexToReal<f32>>>,
 }
 
 impl IfftBank {
+    fn new() -> Self {
+        Self { planner: RealFftPlanner::new(), plans: HashMap::new() }
+    }
+
     fn plan(&mut self, len: usize) -> Arc<dyn ComplexToReal<f32>> {
         let planner = &mut self.planner;
         self.plans
@@ -260,23 +201,16 @@ fn read_cycle(table: &[f32], pos: f32) -> f32 {
 /// (~36 cents resynthesised, ~75 at the top of the keyboard). The bucket is
 /// re-selected only at a cycle boundary, so cycles stay phase-continuous.
 ///
-/// **Buckets are stepped, not blended.** Their waveforms are already aligned to
-/// one phase origin and are one true period each ([`PlaybackGrid`]), so
-/// neighbours differ only by what the source did between them — measured at −75
-/// dB on a steady tone, where a cross-fade bought 1 dB and would blur the
-/// period-to-period variation that on speech is the signal.
+/// **Buckets are stepped, not blended.** One bucket is one period is one
+/// rendered cycle, so there is no span to interpolate across. The cross-fade
+/// that used to live here hid a bucket-rate modulation (148 Hz on a D5) caused
+/// by the analysis not being period-synchronous; it is now, and blending would
+/// only blur real period-to-period variation, which on speech is the signal.
 ///
 /// `target_samples`: `0` = Synth timeline, one cycle per bucket. `> 0` =
 /// Analysis "preserve seconds", render that many samples and pick each cycle's
 /// bucket by position in time, so a note lasts the source's duration at every
 /// key. `cancel` lets the background thread bail out and yield.
-///
-/// `timing` is the source's own clocks ([`BucketTiming`]), present whenever the
-/// grid came from an analysis. It replaces both `ratios` *and* the uniform time
-/// grid: a cycle is rendered at the bucket's true period and the bucket for a
-/// given moment is found by walking the source at wall-clock speed, rather than
-/// by dividing the timeline into equal parts. `None` falls back to `ratios`,
-/// which is what Synth mode and pre-v3 grids use.
 fn render_key_buffer(
     num_harmonics: usize,
     ampl: &[Vec<f32>],
@@ -286,7 +220,6 @@ fn render_key_buffer(
     base_period: f32,
     max_harmonic: usize,
     ratios: &[f32],
-    timing: Option<&BucketTiming>,
     target_samples: usize,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Vec<f32> {
@@ -295,73 +228,75 @@ fn render_key_buffer(
         return Vec::new();
     }
     let drive_by_time = target_samples > 0;
-    // The source's own timing only applies to a note laid on a wall clock; the
-    // Synth timeline is one cycle per bucket and has no source to follow.
-    let timing = timing.filter(|t| drive_by_time && t.describes(num_buckets));
 
     let mut sound: Vec<f32> = Vec::with_capacity(if drive_by_time { target_samples } else { 0 });
-    let mut cache = CycleCache::default();
+    let mut ifft_bank = IfftBank::new();
+    // Two tables so a cycle can be rendered *between* buckets (see the blend
+    // below); `[0]` holds `bucket`, `[1]` holds `next_bucket`.
+    let mut table: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
+    let mut table_bucket = [usize::MAX; 2];
 
-    // Waveform phase, in cycles, and (in source-timed mode) position along the
-    // source, in buckets. Both `f64`: they accumulate for the whole note, and at
-    // 4 kHz and 44.1 kHz an f32 mantissa would start losing sub-sample
-    // resolution within a second, reintroducing the very detuning the fractional
-    // accumulator exists to avoid.
+    // Fundamental phase, in cycles. `f64` because it accumulates for the whole
+    // note: at 4 kHz and 44.1 kHz an f32 mantissa would start losing sub-sample
+    // resolution within a second, reintroducing the very detuning this removes.
     let mut cycles = 0.0f64;
-    let mut along = 0.0f64;
     let mut last_cycle = usize::MAX;
-    let mut bucket = usize::MAX;
+    let mut bucket = 0usize;
+    let mut next_bucket = 0usize;
+    // Weight of `next_bucket` in this cycle's cross-fade; always 0 in Synth mode.
+    let mut blend = 0.0f32;
     let mut period = base_period.max(2.0);
-    let mut dc = 0.0f32;
-    let mut max_h = 0usize;
     let mut last_yield = 0usize;
+
+    // Anti-alias cap: harmonic k lands at k / period cycles per sample, so it
+    // must stay below Nyquist (k < period / 2). Taken **once**, from the
+    // shortest period the note will use, and held for the whole note.
+    //
+    // Deriving it per cycle instead let vibrato walk `floor(period / 2)` across
+    // an integer mid-note, switching the top harmonics off and on at the cycle
+    // boundary — full-depth amplitude modulation at f0, which is a buzz. It
+    // survives zeroing the phases, because it is not a phase effect: that is how
+    // it was finally noticed, after the phase-domain suspects were ruled out.
+    // A note with 3% vibrato moved the cap at a third of its cycle boundaries.
+    //
+    // Holding the cap costs a harmonic or two of bandwidth on the longest
+    // periods, which is inaudible. The flapping was not.
+    let min_period = (0..num_buckets)
+        .map(|b| bucket_period(base_period, ratios, b))
+        .fold(f32::INFINITY, f32::min);
+    let max_h = num_harmonics
+        .min(max_harmonic)
+        .min((min_period * 0.5).floor() as usize);
 
     loop {
         if drive_by_time && sound.len() >= target_samples {
             break;
         }
-
-        // ── Which bucket, and how long is its cycle ──────────────────────────
-        let next = match timing {
-            // Source-timed: the bucket is where we are *along the source*, and
-            // its cycle is its own period. The two advance separately — that is
-            // what lets a key hold the source's duration while playing another
-            // pitch — and at the source's own pitch they coincide exactly, which
-            // is what makes this render the exact inverse there.
-            Some(_) => Some((along as usize).min(num_buckets - 1)),
-            None => {
-                let cycle = cycles as usize;
-                if cycle == last_cycle {
-                    None
-                } else {
-                    last_cycle = cycle;
-                    if drive_by_time {
-                        let t = sound.len() as f64 / target_samples as f64;
-                        Some(((t * num_buckets as f64) as usize).min(num_buckets - 1))
-                    } else if cycle >= num_buckets {
-                        break;
-                    } else {
-                        Some(cycle)
-                    }
+        let cycle = cycles as usize;
+        if cycle != last_cycle {
+            last_cycle = cycle;
+            if drive_by_time {
+                // A bucket is one period, so it is one rendered cycle: pick it
+                // by position in time and use it whole. No fractional position,
+                // no neighbour, no blend.
+                let x = (sound.len() as f64 / target_samples as f64) * num_buckets as f64;
+                bucket = (x as usize).min(num_buckets - 1);
+                next_bucket = bucket;
+                blend = 0.0;
+            } else {
+                if cycle >= num_buckets {
+                    break;
                 }
+                bucket = cycle;
+                next_bucket = cycle;
+                blend = 0.0;
             }
-        };
-        if let Some(b) = next.filter(|&b| b != bucket) {
-            bucket = b;
-            period = match timing {
-                Some(t) => t.periods[b].max(2.0),
-                None => bucket_period(base_period, ratios, b),
-            };
-            // Anti-alias cap: harmonic k lands at k / period cycles per sample,
-            // so it must stay under Nyquist (k < period / 2).
-            max_h = num_harmonics
-                .min(max_harmonic)
-                .min((period * 0.5).floor() as usize);
-            // The bucket's own mean. Dropping it (as this renderer used to) puts
-            // a step at every bucket boundary — worth 41 dB of the exact
-            // inverse's fidelity on a measured tone, and a step at the bucket
-            // rate is heard as buzz, not as a level error.
-            dc = timing.and_then(|t| t.dc.get(b).copied()).unwrap_or(0.0);
+            // Interpolate the pitch too: holding the contour flat for a bucket's
+            // whole span steps the pitch every few cycles instead of gliding
+            // through the vibrato.
+            let p0 = bucket_period(base_period, ratios, bucket);
+            let p1 = bucket_period(base_period, ratios, next_bucket);
+            period = p0 + (p1 - p0) * blend;
         }
 
         if let Some(c) = cancel {
@@ -375,101 +310,44 @@ fn render_key_buffer(
             }
         }
 
-        // Position within the cycle. One running phase for the whole note: the
-        // buckets of a `PlaybackGrid` are rotated to share it, so a bucket change
-        // needs no re-alignment and lands no step.
-        let pos = (cycles - cycles.floor()) as f32;
-        let sample = cache.sample(ampl, phase, ampl_enabled, phase_enabled, bucket, pos, max_h, 0);
-        sound.push((sample + dc).clamp(-1.0, 1.0));
-
-        cycles += 1.0 / period as f64;
-        if let Some(t) = timing {
-            // Past the last bucket, hold it: the analysed material can fall a
-            // fraction of a period short of the duration, and stopping there
-            // would leave the note shorter on some keys than others.
-            along += 1.0 / t.spans[bucket].max(1.0) as f64;
-        }
-    }
-    sound
-}
-
-/// How a key's render is laid out over the source it came from. Every field is
-/// per bucket and in *output* samples.
-///
-/// Two clocks, deliberately separate:
-///
-/// * `periods` is the pitch — the bucket's **true** period ([`PlaybackGrid`]),
-///   transposed onto the key. Not its recorded length: that is the true period
-///   rounded to a whole sample, and a key that renders the rounding hears it as
-///   pitch.
-/// * `spans` is the clock — how long the bucket occupies, which is the source's
-///   own duration and therefore the same on every key ("preserve seconds").
-///
-/// At the source's own pitch the two run together (they differ only by each
-/// bucket's rounding, and not at all on average). Transposed, they separate by
-/// the transposition: the render walks the source at wall-clock speed while the
-/// waveform runs at the key's pitch. One running phase carries the whole note —
-/// the grid's buckets are rotated to share it, so no bucket change re-references
-/// it, and it is that re-referencing which used to drop the rounding of every
-/// bucket at the bucket rate and buzz where the Original Pitch audition did not.
-struct BucketTiming<'a> {
-    periods: &'a [f32],
-    spans: &'a [f32],
-    /// Per-bucket mean (FFT bin 0), on the normalised grid's scale.
-    dc: &'a [f32],
-}
-
-impl BucketTiming<'_> {
-    fn describes(&self, num_buckets: usize) -> bool {
-        self.periods.len() == num_buckets && self.spans.len() == num_buckets
-    }
-}
-
-/// A bucket's waveform, kept between samples so the inverse FFT behind it is
-/// paid once per bucket rather than once per sample.
-///
-/// Two slots, because the source-timed render always reads a bucket and its
-/// successor (it morphs between them). Slot 0 holds the current bucket, slot 1
-/// the next; advancing one bucket therefore re-uses slot 1's table, so the cost
-/// stays at one transform per bucket.
-struct CycleCache {
-    bank: IfftBank,
-    table: [Vec<f32>; 2],
-    /// `usize::MAX` until a table is built, so bucket 0 is not mistaken for one
-    /// already cached.
-    bucket: [usize; 2],
-    len: [usize; 2],
-}
-
-impl Default for CycleCache {
-    fn default() -> Self {
-        Self {
-            bank: IfftBank::default(),
-            table: [Vec::new(), Vec::new()],
-            bucket: [usize::MAX; 2],
-            len: [0; 2],
-        }
-    }
-}
-
-impl CycleCache {
-    /// The bucket's waveform at cycle position `pos`, from `max_h` harmonics.
-    #[allow(clippy::too_many_arguments)]
-    fn sample(
-        &mut self,
-        ampl: &[Vec<f32>],
-        phase: &[Vec<f32>],
-        ampl_enabled: &[bool],
-        phase_enabled: &[bool],
-        bucket: usize,
-        pos: f32,
-        max_h: usize,
-        slot: usize,
-    ) -> f32 {
-        if max_h == 0 {
-            return 0.0;
-        }
-        if max_h <= IFFT_MIN_HARMONICS {
+        let pos = (cycles - cycles.floor()) as f32; // position within the cycle
+        let sample = if max_h == 0 {
+            0.0
+        } else if max_h > IFFT_MIN_HARMONICS {
+            // Fast path: one inverse real-FFT per bucket, then fractional readout.
+            let len = cycle_table_len(max_h);
+            for (slot, b) in [bucket, next_bucket].into_iter().enumerate() {
+                if table_bucket[slot] == b && table[slot].len() == len {
+                    continue;
+                }
+                // Advancing a bucket: the new `bucket` is the old `next_bucket`,
+                // so take that table over rather than transforming it again -
+                // the cost stays at one inverse FFT per bucket, not per cycle.
+                if slot == 0 && table_bucket[1] == b && table[1].len() == len {
+                    table.swap(0, 1);
+                    table_bucket.swap(0, 1);
+                    continue;
+                }
+                build_cycle_table(
+                    &mut ifft_bank,
+                    &mut table[slot],
+                    ampl,
+                    phase,
+                    ampl_enabled,
+                    phase_enabled,
+                    b,
+                    len,
+                    max_h,
+                );
+                table_bucket[slot] = b;
+            }
+            let a = read_cycle(&table[0], pos);
+            if blend > 0.0 {
+                a + (read_cycle(&table[1], pos) - a) * blend
+            } else {
+                a
+            }
+        } else {
             // Direct sinusoid sum — cheaper than a table for few harmonics, and
             // exact (no interpolation).
             let mut acc = 0.0f32;
@@ -477,43 +355,26 @@ impl CycleCache {
                 if !ampl_enabled[n] {
                     continue;
                 }
-                let a = ampl[n][bucket];
-                if a == 0.0 {
+                let (a0, a1) = (ampl[n][bucket], ampl[n][next_bucket]);
+                if a0 == 0.0 && a1 == 0.0 {
                     continue;
                 }
-                let ph = if phase_enabled[n] { phase[n][bucket] } else { 0.0 };
-                acc += a * (TWO_PI * (n as f32 + 1.0) * pos + ph).sin();
+                let ph = |b: usize| if phase_enabled[n] { phase[n][b] } else { 0.0 };
+                let w = TWO_PI * (n as f32 + 1.0) * pos;
+                let s0 = a0 * (w + ph(bucket)).sin();
+                acc += if blend > 0.0 {
+                    let s1 = a1 * (w + ph(next_bucket)).sin();
+                    s0 + (s1 - s0) * blend
+                } else {
+                    s0
+                };
             }
-            return acc;
-        }
-        // Fast path: one inverse real-FFT per bucket, then fractional readout.
-        let len = cycle_table_len(max_h);
-        if self.bucket[slot] != bucket || self.len[slot] != len {
-            // Advancing a bucket makes the old "next" the new "current", so take
-            // that table over rather than transforming it again.
-            let other = 1 - slot;
-            if self.bucket[other] == bucket && self.len[other] == len {
-                self.table.swap(0, 1);
-                self.bucket.swap(0, 1);
-                self.len.swap(0, 1);
-            } else {
-                build_cycle_table(
-                    &mut self.bank,
-                    &mut self.table[slot],
-                    ampl,
-                    phase,
-                    ampl_enabled,
-                    phase_enabled,
-                    bucket,
-                    len,
-                    max_h,
-                );
-                self.bucket[slot] = bucket;
-                self.len[slot] = len;
-            }
-        }
-        read_cycle(&self.table[slot], pos)
+            acc
+        };
+        sound.push(sample.clamp(-1.0, 1.0));
+        cycles += 1.0 / period as f64;
     }
+    sound
 }
 
 /// Scale the grid down so no bucket's harmonics can sum past 1.0 — the rendered
@@ -629,147 +490,6 @@ pub fn resynthesize_exact(
     resample_stream(&out, rate_ratio as f64)
 }
 
-/// The grid a key transposes from: the same harmonics as the analysis, but
-/// measured over the source's **true** period instead of the whole number of
-/// samples that period rounds to, and pre-rotated so every bucket shares one
-/// phase origin.
-///
-/// Why it exists. A bucket is a whole number of samples and a period is not
-/// (150 samples for a true 149.83), so the bucket's bins are those of a window
-/// that does not close. That costs the exact inverse nothing — the same bins put
-/// those very samples back — but a key does not play the samples, it plays the
-/// bins *as a periodic waveform*, and a window that does not close spreads every
-/// harmonic across its neighbours. The spreading depends on where the rounding
-/// fell, so it differs from bucket to bucket, and what a key hears is that
-/// difference arriving at the bucket rate: a few hundred Hz of roughness, the
-/// buzz that the Original Pitch audition of the same grid does not have.
-/// Measured on a steady 12-harmonic tone whose period is 149.83 samples, against
-/// the exact transposition of it: **−27 dB** from the bucket's own bins, **−74
-/// dB** from a true period of the reconstruction. (A tone whose period happened
-/// to be a whole 400 samples measured −100 dB either way — the giveaway that the
-/// rounding, not the renderer, was the defect.)
-///
-/// So: reconstruct the source exactly (that reconstruction is what Original
-/// Pitch And Gain plays), cut one *fractional* period out of it per bucket, and
-/// transform that. Every bucket then holds a waveform that closes, and
-/// neighbouring buckets differ only by what the source actually did.
-pub struct PlaybackGrid {
-    /// `[harmonic][bucket]`, normalised like the playback grid it replaces.
-    pub amplitude: Vec<Vec<f32>>,
-    /// `[harmonic][bucket]`, with each bucket's rotation against the shared
-    /// phase origin already applied, so the renderer reads every bucket at the
-    /// same running phase and switching between them is seamless.
-    pub phase: Vec<Vec<f32>>,
-    /// Per-bucket mean, on the same scale as `amplitude`.
-    pub dc: Vec<f32>,
-    /// The true period, in source samples — what one cycle of a bucket is.
-    pub periods: Vec<f32>,
-    /// The bucket's wall-clock span, in source samples: its recorded length.
-    pub spans: Vec<f32>,
-}
-
-/// The true period of each bucket, in source samples.
-///
-/// Shape from the pitch contour (`ratios`, the local fundamental over the
-/// nominal one — the only unrounded pitch the analysis kept), scale from the
-/// lengths, which tile the source exactly: whatever the contour's absolute
-/// calibration, the buckets *are* the periods, so their total is the total.
-/// A flat contour therefore yields the mean bucket length, which is the true
-/// period of a steady source to a small fraction of a sample.
-///
-/// The last bucket is left out of the scale: it absorbs the subtrack's
-/// remainder, so its length is not a period.
-fn true_periods(lengths: &[usize], ratios: &[f32]) -> Vec<f32> {
-    let n = lengths.len();
-    let shape: Vec<f32> = (0..n)
-        .map(|b| 1.0 / ratios.get(b).copied().unwrap_or(1.0).max(1e-3))
-        .collect();
-    let upto = if n > 1 { n - 1 } else { n };
-    let total_len: f32 = lengths[..upto].iter().map(|&l| l as f32).sum();
-    let total_shape: f32 = shape[..upto].iter().sum();
-    let scale = if total_shape > 0.0 { total_len / total_shape } else { 1.0 };
-    shape.iter().map(|s| (s * scale).max(2.0)).collect()
-}
-
-/// Build the [`PlaybackGrid`] for an analysed grid, or `None` when the analysis
-/// did not record what it takes (a hand-drawn grid, or a `.lsft` from before
-/// version 3) — the caller then transposes from the stored grid as before.
-pub fn build_playback_grid(
-    amplitude: &[Vec<f32>],
-    phase: &[Vec<f32>],
-    lengths: &[usize],
-    dc: &[f32],
-    nyq: &[f32],
-    ratios: &[f32],
-) -> Option<PlaybackGrid> {
-    let nb = lengths.len();
-    let num_harmonics = amplitude.len();
-    if nb == 0 || num_harmonics == 0 || amplitude[0].len() != nb || lengths.iter().any(|&l| l < 2) {
-        return None;
-    }
-    // The exact inverse, on the grid's own scale and at the analysis rate: no
-    // display gain to undo and no rate to convert, because nothing here leaves
-    // the source's own timebase. Toggles are deliberately not applied — they are
-    // a per-key render-time edit, and applying them twice would zero a phase
-    // that this transform has already folded into a waveform.
-    let source = resynthesize_exact(amplitude, phase, lengths, dc, nyq, &[], &[], 0.0, 1.0);
-    if source.is_empty() {
-        return None;
-    }
-
-    let periods = true_periods(lengths, ratios);
-    let kernel = resample_kernel();
-    let mut planner = RealFftPlanner::<f32>::new();
-    let mut out_amp = vec![vec![0.0f32; nb]; num_harmonics];
-    let mut out_phase = vec![vec![0.0f32; nb]; num_harmonics];
-    let mut out_dc = vec![0.0f32; nb];
-
-    let mut start = 0.0f64; // where this bucket begins in the source
-    let mut rot = 0.0f64; // cycles the fundamental has run by then
-    for b in 0..nb {
-        let t = periods[b] as f64;
-        // One cycle sampled over the true period. Sized to hold every harmonic
-        // the period can carry, so nothing is lost before the key's own
-        // anti-alias cap gets to choose.
-        let top = num_harmonics.min(((t as usize).saturating_sub(1)) / 2).max(1);
-        let n = (2 * (top + 1)).max(32).next_power_of_two();
-        let fft = planner.plan_fft_forward(n);
-        let mut cycle: Vec<f32> = (0..n)
-            .map(|i| sinc_read(&source, &kernel, start + (i as f64 / n as f64) * t))
-            .collect();
-        let mut spectrum = fft.make_output_vec();
-        if fft.process(&mut cycle, &mut spectrum).is_err() {
-            return None;
-        }
-        out_dc[b] = spectrum[0].re / n as f32;
-        for k in 1..=top.min(spectrum.len() - 1) {
-            let x = spectrum[k];
-            out_amp[k - 1][b] = 2.0 * (x.re * x.re + x.im * x.im).sqrt() / n as f32;
-            // `analyze_subtrack`'s convention: the DFT's cosine reference turned
-            // into the renderer's sine one, then rotated back to the shared phase
-            // origin so every bucket reads at the same running phase.
-            let ph = x.im.atan2(x.re) + std::f32::consts::FRAC_PI_2;
-            out_phase[k - 1][b] = ph - TWO_PI * k as f32 * (rot as f32);
-        }
-        rot += lengths[b] as f64 / t;
-        start += lengths[b] as f64;
-    }
-
-    let divisor = normalize_grid_per_bucket(&mut out_amp);
-    if divisor > 0.0 {
-        for v in out_dc.iter_mut() {
-            *v /= divisor;
-        }
-    }
-    Some(PlaybackGrid {
-        amplitude: out_amp,
-        phase: out_phase,
-        dc: out_dc,
-        periods,
-        spans: lengths.iter().map(|&l| l as f32).collect(),
-    })
-}
-
 /// Half-width of the resampling kernel, in taps. 32 a side measures better than
 /// −80 dB on tones from 110 Hz to 7 kHz at every rate pair in use
 /// (`resample_stream_is_transparent`).
@@ -796,53 +516,6 @@ fn bessel_i0(x: f64) -> f64 {
     sum
 }
 
-/// The Kaiser-windowed sinc itself, sampled on `[0, RESAMPLE_TAPS]` in tap
-/// units, with one extra entry so a reader can always interpolate `k + 1`.
-/// Shared by [`resample_stream`] and [`sinc_read`].
-fn resample_kernel() -> Vec<f64> {
-    let beta = 10.0;
-    let norm = bessel_i0(beta);
-    (0..=RESAMPLE_TAPS * RESAMPLE_KERNEL_STEPS + 1)
-        .map(|i| {
-            let x = i as f64 / RESAMPLE_KERNEL_STEPS as f64; // taps from centre
-            if x >= RESAMPLE_TAPS as f64 {
-                return 0.0;
-            }
-            let t = x / RESAMPLE_TAPS as f64;
-            let window = bessel_i0(beta * (1.0 - t * t).max(0.0).sqrt()) / norm;
-            let arg = std::f64::consts::PI * x;
-            let sinc = if x == 0.0 { 1.0 } else { arg.sin() / arg };
-            sinc * window
-        })
-        .collect()
-}
-
-/// Read `input` between its samples at `pos`, band-limited — the same kernel
-/// [`resample_stream`] uses, at one point instead of a stream, and at full
-/// bandwidth (the sample grid moves, the content does not).
-///
-/// Used to cut a bucket's true period out of the reconstruction, where a cubic
-/// read is not good enough: a period of real material carries content up to its
-/// own Nyquist, and Catmull-Rom's error there is broadband — it measured 12 dB
-/// worse on a key transposed 19 semitones up.
-fn sinc_read(input: &[f32], table: &[f64], pos: f64) -> f32 {
-    let half = RESAMPLE_TAPS as f64;
-    let first = (pos - half).ceil().max(0.0) as usize;
-    let last = ((pos + half).floor() as i64).min(input.len() as i64 - 1);
-    let mut acc = 0.0f64;
-    for i in first as i64..=last {
-        let x = (pos - i as f64).abs() * RESAMPLE_KERNEL_STEPS as f64;
-        let k = x as usize;
-        if k + 1 >= table.len() {
-            continue;
-        }
-        let f = x - k as f64;
-        let w = table[k] + (table[k + 1] - table[k]) * f;
-        acc += input[i as usize] as f64 * w;
-    }
-    acc as f32
-}
-
 /// Resample a finished signal by `ratio = output_rate / input_rate` with a
 /// Kaiser-windowed sinc. Output length `round(len × ratio)`, so the note keeps
 /// its duration; downsampling drops the cutoff to `ratio` (widening the support
@@ -867,7 +540,23 @@ pub fn resample_stream(input: &[f32], ratio: f64) -> Vec<f32> {
     }
 
     let cutoff = ratio.min(1.0);
-    let table = resample_kernel();
+    // Kernel sampled on [0, RESAMPLE_TAPS] in tap units; one extra entry so the
+    // interpolation below can always read `k + 1`.
+    let beta = 10.0;
+    let norm = bessel_i0(beta);
+    let table: Vec<f64> = (0..=RESAMPLE_TAPS * RESAMPLE_KERNEL_STEPS + 1)
+        .map(|i| {
+            let x = i as f64 / RESAMPLE_KERNEL_STEPS as f64; // taps from centre
+            if x >= RESAMPLE_TAPS as f64 {
+                return 0.0;
+            }
+            let t = x / RESAMPLE_TAPS as f64;
+            let window = bessel_i0(beta * (1.0 - t * t).max(0.0).sqrt()) / norm;
+            let arg = std::f64::consts::PI * x;
+            let sinc = if x == 0.0 { 1.0 } else { arg.sin() / arg };
+            sinc * window
+        })
+        .collect();
 
     let len = input.len();
     let out_len = ((len as f64) * ratio).round() as usize;
@@ -934,9 +623,6 @@ pub fn resynthesize_grid(
         base_period.max(2.0),
         if max_harmonic == 0 { num_harmonics } else { max_harmonic },
         pitch_ratio,
-        // The bridge passes a contour, not the source's own lengths — it renders
-        // what a host asked for, not a loaded instance's analysis.
-        None,
         target_samples,
         None,
     );
@@ -1448,19 +1134,11 @@ impl SynthComputeEngine {
             *self.shared_params.normalization_needed.lock().unwrap() = false;
         }
 
-        // Before the grid locks below: building it reads the analysis grid.
-        let playback = playback_grid(&self.shared_params);
-
         let num_harmonics = self.shared_params.amplitude_data.lock().unwrap().len();
         let ampl_data_normalized = self.shared_params.amplitude_data_normalized.lock().unwrap();
         let phase_data = self.shared_params.phase_data.lock().unwrap();
         // Per-bucket vibrato ratios apply only in Analysis mode; flat otherwise.
-        // They are the fallback for a grid with no `PlaybackGrid` — a hand-drawn
-        // one, or a `.lsft` from before version 3.
         let pitch_ratio = bucket_pitch_ratios(&self.shared_params);
-        let timing = playback
-            .as_ref()
-            .and_then(|g| key_timing(g, &self.shared_params, base_period));
         // Hoist the per-harmonic enable flags out of the hot loops — locking
         // them per sample (as before) cost a mutex round-trip for every output
         // sample, making large analysis buffers crawl.
@@ -1479,26 +1157,15 @@ impl SynthComputeEngine {
         // Synth mode: one period per bucket. Analysis mode: the source duration.
         let target_samples = target_samples_for(&self.shared_params);
 
-        // With a `PlaybackGrid` the key transposes from *its* harmonics, not the
-        // analysis grid's — that is the whole point of it.
-        let (ampl, phase): (&[Vec<f32>], &[Vec<f32>]) = match (&playback, &timing) {
-            (Some(g), Some(_)) => (&g.amplitude, &g.phase),
-            _ => (&ampl_data_normalized, &phase_data),
-        };
         let sound = render_key_buffer(
             num_harmonics,
-            ampl,
-            phase,
+            &ampl_data_normalized,
+            &phase_data,
             &harmonic_ampl_enabled,
             phase_enabled,
             base_period,
             max_harmonic,
             &pitch_ratio,
-            timing.as_ref().zip(playback.as_ref()).map(|((p, s), g)| BucketTiming {
-                periods: p,
-                spans: s,
-                dc: &g.dc,
-            }).as_ref(),
             target_samples,
             None,
         );
@@ -1674,12 +1341,8 @@ impl SynthComputeEngine {
         // Calculate maximum usable harmonic for this key to prevent aliasing
         let max_harmonic = max_harmonic_for_key(key);
 
-        // Before the grid locks below: building it reads the analysis grid. The
-        // background thread is where this transform is paid for, most of the time.
-        let playback = playback_grid(shared_params);
-
         // Copy all required data once and release locks immediately to avoid blocking GUI
-        let (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, base_period, pitch_ratio, timing, target_samples) = {
+        let (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, base_period, pitch_ratio, target_samples) = {
             let ampl_data_normalized = shared_params.amplitude_data_normalized.lock().unwrap();
             let phase_data = shared_params.phase_data.lock().unwrap();
             let piano_periods = shared_params.piano_periods.lock().unwrap();
@@ -1701,39 +1364,23 @@ impl SynthComputeEngine {
             } else {
                 harmonic_phase_enabled.clone()
             };
-            // Per-bucket vibrato ratios (Analysis mode only; empty → flat) —
-            // the fallback for a grid with no `PlaybackGrid`. Both are read here
-            // so this path renders exactly what the synchronous one does.
+            // Per-bucket vibrato ratios (Analysis mode only; empty → flat).
             let pitch_ratio = bucket_pitch_ratios(shared_params);
-            let timing = playback
-                .as_ref()
-                .and_then(|g| key_timing(g, shared_params, base_period));
             // Synth mode: one period per bucket. Analysis mode: source duration.
             let target_samples = target_samples_for(shared_params);
 
-            (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, base_period, pitch_ratio, timing, target_samples)
+            (num_harmonics, ampl_data_copy, phase_data_copy, harmonic_ampl_enabled_copy, harmonic_phase_enabled_copy, base_period, pitch_ratio, target_samples)
         }; // All locks are released here
 
-        // With a `PlaybackGrid` the key transposes from *its* harmonics; the
-        // copies above are the fallback for a grid that has none.
-        let (ampl, phase): (&[Vec<f32>], &[Vec<f32>]) = match (&playback, &timing) {
-            (Some(g), Some(_)) => (&g.amplitude, &g.phase),
-            _ => (&ampl_data_copy, &phase_data_copy),
-        };
         let sound = render_key_buffer(
             num_harmonics,
-            ampl,
-            phase,
+            &ampl_data_copy,
+            &phase_data_copy,
             &harmonic_ampl_enabled_copy,
             &harmonic_phase_enabled_copy,
             base_period,
             max_harmonic,
             &pitch_ratio,
-            timing.as_ref().zip(playback.as_ref()).map(|((p, s), g)| BucketTiming {
-                periods: p,
-                spans: s,
-                dc: &g.dc,
-            }).as_ref(),
             target_samples,
             Some(&shared_params.computation_cancel),
         );
@@ -2553,7 +2200,7 @@ mod tests {
 
             let want = direct_bucket(&ampl, &phase, &ampl_enabled, &phase_enabled, 0, period, max_h);
 
-            let mut bank = IfftBank::default();
+            let mut bank = IfftBank::new();
             let mut table = Vec::new();
             let len = cycle_table_len(max_h);
             build_cycle_table(
@@ -2668,14 +2315,6 @@ mod tests {
 
     /// The host bridge must render exactly what playback renders — a regression
     /// test built on it is worthless if the two can drift apart.
-    ///
-    /// The bridge is handed a grid and a contour and nothing else, so this is
-    /// the case where playback has nothing more either: a grid with no recorded
-    /// bucket lengths, which is what a hand-drawn grid and any pre-v3 `.lsft`
-    /// are. **An analysed grid renders differently on a key** — it follows the
-    /// source's own bucket periods ([`source_timing`]), which the bridge's
-    /// arguments cannot express; carrying them across the ABI is what it would
-    /// take to compare the two on analysed material.
     #[test]
     fn resynthesize_grid_matches_the_playback_path() {
         let engine = create_test_engine();
@@ -2683,9 +2322,6 @@ mod tests {
         let f = 220.0;
         let samples = tone(sr, f, 0.4);
         engine.analyze_and_load(&samples, sr, f, &[], 0);
-        // Drop the lengths, leaving the grid the bridge's arguments describe.
-        engine.shared_params.analysis_bucket_lengths.lock().unwrap().clear();
-        engine.shared_params.mark_all_buffers_dirty();
 
         let key = 40;
         let via_engine = engine.assemble_buffer_for_key(key);
@@ -3125,457 +2761,188 @@ mod tests {
         *engine.shared_params.analysis_base_freq.lock().unwrap() = 0.0;
         assert!(engine.assemble_buffer_at_original_pitch().is_empty());
     }
-}
 
-#[cfg(test)]
-mod keyboard_fidelity {
-    use super::*;
-    use crate::params::LeSynthParams;
-    use std::sync::Arc;
+    // ── Renderer fidelity, isolated from any source material ────────────────
+    //
+    // A grid whose every bucket is identical, with a constant pitch ratio, must
+    // render as a *perfectly periodic* waveform: sample n is exactly
+    // `sum_k a_k sin(2 pi k n / P + phi_k)`. There is no vibrato to track, no
+    // bucket to step to, and no source transient to blame, so every deviation
+    // from that closed form is the renderer's own error — which is what a key
+    // adds on top of the analysis and "Play Original Pitch" does not.
 
-    /// A harmonic-rich source with an optional vibrato, plus its contour — the
-    /// shape of thing the Resynthesis panel hands over.
-    fn source(sr: f32, f0: f32, secs: f32, vib: f32) -> (Vec<f32>, Vec<f32>) {
-        let n = (sr * secs) as usize;
-        let mut fund = 0.0f32;
-        let mut out = Vec::with_capacity(n);
-        let mut contour = Vec::new();
-        for i in 0..n {
-            let t = i as f32 / sr;
-            let f = f0 * (1.0 + vib * (2.0 * std::f32::consts::PI * 5.0 * t).sin());
-            fund += 2.0 * std::f32::consts::PI * f / sr;
-            let s: f32 = (1..=12)
-                .map(|k| {
-                    let kk = k as f32;
-                    (1.0 / kk) * (fund * kk + 0.7 * kk).sin()
-                })
-                .sum();
-            out.push(s * 0.35);
-            if i % 256 == 0 {
-                contour.push(f);
+    /// The closed form the renderer is approximating.
+    fn ideal_sample(ampl: &[Vec<f32>], phase: &[Vec<f32>], max_h: usize, cycles: f64) -> f64 {
+        let mut acc = 0.0f64;
+        for n in 0..max_h {
+            let a = ampl[n][0] as f64;
+            if a == 0.0 {
+                continue;
+            }
+            let k = (n + 1) as f64;
+            acc += a * (std::f64::consts::TAU * k * cycles + phase[n][0] as f64).sin();
+        }
+        acc
+    }
+
+    /// Render a flat grid of `harmonics` harmonics and return
+    /// `(residual_db, peak_error)` against the closed form.
+    fn flat_grid_residual(harmonics: usize, base_period: f32, zero_phase: bool) -> (f64, f64) {
+        let nb = 64;
+        let mut ampl = vec![vec![0.0f32; nb]; NUM_HARMONICS];
+        let mut phase = vec![vec![0.0f32; nb]; NUM_HARMONICS];
+        // 1/k amplitudes: a sawtooth-ish spectrum, energy in every harmonic so
+        // the top of the band is actually exercised. Scaled so the worst-case
+        // in-phase sum stays under 1.0, exactly as `normalize_grid_per_bucket`
+        // guarantees for a real grid — otherwise the renderer's output clamp
+        // clips the peaks and swamps the measurement.
+        let raw: Vec<f32> = (0..harmonics).map(|n| 1.0 / (n as f32 + 1.0)).collect();
+        let scale = 0.95 / raw.iter().sum::<f32>();
+        for n in 0..harmonics {
+            for b in 0..nb {
+                ampl[n][b] = raw[n] * scale;
+                phase[n][b] = if zero_phase { 0.0 } else { (n as f32) * 0.7 };
             }
         }
-        (out, contour)
-    }
-
-    /// Error of `got` against `want` in dB, after fitting one gain — a key plays
-    /// the grid at its normalised level, which is a level difference and not a
-    /// distortion.
-    fn err_db(got: &[f32], want: &[f32]) -> f64 {
-        let n = got.len().min(want.len());
-        let (mut num, mut den) = (0.0f64, 0.0f64);
-        for i in 0..n {
-            num += got[i] as f64 * want[i] as f64;
-            den += (want[i] as f64) * (want[i] as f64);
-        }
-        let g = if den > 0.0 { num / den } else { 1.0 };
-        let (mut e, mut r) = (0.0f64, 0.0f64);
-        for i in 0..n {
-            let d = got[i] as f64 - g * want[i] as f64;
-            e += d * d;
-            r += (g * want[i] as f64) * (g * want[i] as f64);
-        }
-        10.0 * (e.max(1e-300) / r.max(1e-300)).log10()
-    }
-
-    fn analysed(sr: f32, f0: f32, vib: f32) -> (SynthComputeEngine, Vec<f32>) {
-        let engine = SynthComputeEngine::new(Arc::new(LeSynthParams::default()));
-        let (src, contour) = source(sr, f0, 1.0, vib);
-        engine.analyze_and_load(&src, sr, f0, &contour, 0);
-        *engine.shared_params.sample_rate.lock().unwrap() = sr;
-        (engine, src)
-    }
-
-    /// **The requirement**: the key whose period *is* the source's must sound
-    /// like the source, not like a rough copy of it — what "Original Pitch And
-    /// Gain" plays, on a key.
-    ///
-    /// It is the same grid either way, so any gap is the renderer's. Before the
-    /// source's own bucket periods drove it, this measured −32 dB on a steady
-    /// tone and −12 dB with vibrato against a −134 dB audition: the bucket
-    /// lengths were rounded to whole samples and then re-imposed as a pitch,
-    /// which lands that rounding as a phase jump at the cycle rate. Both figures
-    /// are now past −45 dB, and the bound below is set with room for the cycle
-    /// table's own error rather than at the measured value.
-    #[test]
-    fn a_key_at_the_sources_own_pitch_reproduces_the_source() {
-        let sr = 44100.0;
-        // 440 Hz is key 48 exactly, so this key transposes by 1.0.
-        for vib in [0.0f32, 0.03] {
-            let (engine, src) = analysed(sr, 440.0, vib);
-            let audition = engine.assemble_buffer_at_original_pitch();
-            let key = engine.assemble_buffer_for_key(48);
-            assert!(
-                err_db(&audition, &src) < -100.0,
-                "the audition is the reference and must stay exact: {:.1} dB",
-                err_db(&audition, &src)
-            );
-            let got = err_db(&key, &src);
-            assert!(
-                got < -45.0,
-                "key 48 (vib {vib}) is {got:.1} dB from the source it was analysed from"
-            );
-        }
-    }
-
-    /// The two clocks a key runs on. `periods` is the pitch — one true period of
-    /// the source, transposed — and `spans` is the wall clock, the bucket's own
-    /// duration, which is the same on every key ("preserve seconds"). At the
-    /// source's own pitch they coincide; below it the cycle outlasts the bucket.
-    #[test]
-    fn a_key_runs_on_the_sources_period_and_the_sources_clock() {
-        let sr = 44100.0;
-        let (engine, _) = analysed(sr, 440.0, 0.0);
-        let grid = playback_grid(&engine.shared_params).expect("an analysed grid has one");
-        let unity = engine.shared_params.piano_periods.lock().unwrap()[48];
-        let (p48, s48) = key_timing(&grid, &engine.shared_params, unity).unwrap();
-        // At the source's own pitch the two clocks run together: each bucket's
-        // cycle is within the rounding of its span (that rounding is precisely
-        // what the period no longer inherits), and over the note they agree.
-        for (p, s) in p48.iter().zip(&s48).take(s48.len() - 1) {
-            assert!(
-                (p - s).abs() <= 1.0,
-                "at the source's own pitch a bucket's period is its span: {p} vs {s}"
-            );
-        }
-        let n = s48.len() - 1;
-        let mean = |v: &[f32]| v[..n].iter().sum::<f32>() / n as f32;
-        assert!(
-            (mean(&p48) - mean(&s48)).abs() < 0.01,
-            "the two clocks must not drift apart: {} vs {}",
-            mean(&p48),
-            mean(&s48)
+        let enabled = vec![true; NUM_HARMONICS];
+        let ratios = vec![1.0f32; nb];
+        let target = (base_period * nb as f32) as usize;
+        let out = render_key_buffer(
+            NUM_HARMONICS, &ampl, &phase, &enabled, &enabled,
+            base_period, harmonics, &ratios, target, None,
         );
-        let low = engine.shared_params.piano_periods.lock().unwrap()[36];
-        let (p36, s36) = key_timing(&grid, &engine.shared_params, low).unwrap();
-        assert!(p36[0] > s36[0], "an octave down the cycle outlasts the bucket");
-        // An octave is a factor of two, and the wall clock does not move with it.
-        assert!((p36[0] / p48[0] - 2.0).abs() < 0.01);
-        assert!((s36[0] - s48[0]).abs() < 1e-3);
+        assert!(!out.is_empty(), "renderer produced nothing");
+
+        let max_h = harmonics.min((base_period * 0.5).floor() as usize);
+        let (mut se, mut sr, mut peak) = (0.0f64, 0.0f64, 0.0f64);
+        // Skip the first cycle: the accumulator starts at an exact boundary and
+        // the comparison is about the steady state.
+        let skip = base_period.ceil() as usize;
+        for n in skip..out.len() {
+            let want = ideal_sample(&ampl, &phase, max_h, n as f64 / base_period as f64);
+            let got = out[n] as f64;
+            let d = got - want;
+            peak = peak.max(d.abs());
+            se += d * d;
+            sr += want * want;
+        }
+        (10.0 * (se / sr.max(1e-30)).max(1e-30).log10(), peak)
     }
 
-    /// A steady source has one period, however its buckets rounded: the grid a
-    /// key transposes from must say so, or the rounding is heard as pitch.
     #[test]
-    fn the_playback_grid_holds_one_steady_period() {
-        let sr = 44100.0;
-        let (engine, _) = analysed(sr, 440.0, 0.0);
-        let grid = playback_grid(&engine.shared_params).unwrap();
-        let lens = engine.shared_params.analysis_bucket_lengths.lock().unwrap().clone();
-        // The recorded lengths are whole samples and do vary…
-        assert!(lens.iter().any(|&l| l != lens[0]), "the rounding should be visible");
-        // …while the periods they stand for do not.
-        let inner = &grid.periods[..grid.periods.len() - 1];
-        let (min, max) = inner.iter().fold((f32::MAX, 0.0f32), |(a, b), &p| (a.min(p), b.max(p)));
-        assert!(
-            max - min < 1e-3,
-            "a steady source must have one period, got {min}..{max}"
-        );
-        // And it is the source's: 44100 / 440.
-        assert!((min - sr / 440.0).abs() < 0.2, "{min} is not the source's period");
+    fn flat_grid_renders_the_closed_form() {
+        // Below IFFT_MIN_HARMONICS the renderer sums sinusoids directly, so it
+        // *is* the closed form and this pins the convention (phase sign, table
+        // scaling) that the fast path is then measured against.
+        let (db, peak) = flat_grid_residual(8, 222.987, false);
+        println!("direct sum, 8 harmonics: {db:.1} dB residual, peak {peak:.2e}");
+        assert!(db < -100.0, "direct sinusoid path should be exact, got {db:.1} dB");
     }
 
-    /// The per-bucket mean is part of the sound: dropping it puts a step at every
-    /// bucket boundary. It is the mean of the reconstruction over that bucket's
-    /// period, on the same scale as the harmonics beside it — a missing `1/N`
-    /// from the transform would land it `N` times too loud.
     #[test]
-    fn the_playback_grid_carries_the_mean() {
-        let sr = 44100.0;
-        // A source with a mean of its own, so there is something to carry.
-        let n = (sr * 0.3) as usize;
-        let src: Vec<f32> = (0..n)
-            .map(|i| 0.2 + 0.5 * (TWO_PI * 440.0 * i as f32 / sr).sin())
+    fn cycle_table_readout_is_accurate() {
+        // The fast path builds one inverse FFT per bucket and reads it at
+        // fractional positions. On a flat grid the answer must still be the
+        // closed form; whatever it falls short by is distortion locked to the
+        // cycle rate, i.e. audible as a buzz at f0 rather than as noise.
+        for &h in &[16usize, 32, 64, 111] {
+            let (db, peak) = flat_grid_residual(h, 222.987, false);
+            println!("cycle table, {h:3} harmonics: {db:7.1} dB residual, peak {peak:.2e}");
+        }
+        for &h in &[16usize, 32, 64, 111] {
+            let (db, peak) = flat_grid_residual(h, 222.987, true);
+            println!("zero phase,  {h:3} harmonics: {db:7.1} dB residual, peak {peak:.2e}");
+        }
+        let (db, _) = flat_grid_residual(64, 222.987, false);
+        assert!(db < -80.0, "cycle-table readout only reaches {db:.1} dB");
+    }
+
+    #[test]
+    fn harmonic_content_is_stable_across_vibrato_cycles() {
+        // The anti-alias cap is `floor(period / 2)`. Vibrato moves `period`, so
+        // recomputing the cap per cycle steps it across an integer mid-note and
+        // switches the top harmonics off and on at the cycle boundary — a
+        // full-depth amplitude modulation at f0, i.e. a buzz. It survives
+        // zeroing the phases, because it is not a phase effect, which is how it
+        // was finally noticed.
+        //
+        // Two harmonics are watched. `k_safe` sits well below the cap for every
+        // period the note uses and must be rendered at full amplitude on every
+        // cycle — that pins the cap against being fixed by simply throwing away
+        // bandwidth. `k_edge` straddles `2 * floor(period / 2)`, so it is the one
+        // that used to flap; it must come out *consistent*, in or out for the
+        // whole note but never alternating.
+        //
+        // Synth mode (target_samples = 0) so bucket == cycle and the renderer's
+        // accumulator is trivially reproducible here.
+        let nb = 64;
+        let k_safe = 90usize;
+        let k_edge = 100usize;
+        let base_period = 200.0f32;
+        let mut ampl = vec![vec![0.0f32; nb]; NUM_HARMONICS];
+        let phase = vec![vec![0.0f32; nb]; NUM_HARMONICS];
+        for b in 0..nb {
+            ampl[0][b] = 0.5;
+            ampl[k_safe - 1][b] = 0.1;
+            ampl[k_edge - 1][b] = 0.1;
+        }
+        // Periods alternate 199.6 / 200.4, straddling 2 * k_edge: floor(p / 2) is
+        // 99 on one and 100 on the other.
+        let ratios: Vec<f32> = (0..nb)
+            .map(|b| if b % 2 == 0 { base_period / 199.6 } else { base_period / 200.4 })
             .collect();
-        let engine = SynthComputeEngine::new(Arc::new(LeSynthParams::default()));
-        engine.shared_params.update_sample_rate(sr);
-        engine.analyze_and_load(&src, sr, 440.0, &[], 0);
-        let grid = playback_grid(&engine.shared_params).unwrap();
-        // Against the same mean measured straight off the reconstruction.
-        let y = resynthesize_exact(
-            &engine.shared_params.amplitude_data.lock().unwrap(),
-            &engine.shared_params.phase_data.lock().unwrap(),
-            &engine.shared_params.analysis_bucket_lengths.lock().unwrap(),
-            &engine.shared_params.analysis_dc.lock().unwrap(),
-            &engine.shared_params.analysis_nyquist.lock().unwrap(),
-            &[],
-            &[],
-            0.0,
-            1.0,
+        let enabled = vec![true; NUM_HARMONICS];
+
+        let out = render_key_buffer(
+            NUM_HARMONICS, &ampl, &phase, &enabled, &enabled,
+            base_period, NUM_HARMONICS, &ratios, 0, None,
         );
-        let divisor = {
-            let mut a = engine.shared_params.amplitude_data.lock().unwrap().clone();
-            normalize_grid_per_bucket(&mut a)
-        };
-        let b = 10usize;
-        let start: f32 = engine.shared_params.analysis_bucket_lengths.lock().unwrap()[..b]
-            .iter()
-            .map(|&l| l as f32)
-            .sum();
-        let t = grid.periods[b];
-        let want: f32 = (0..64)
-            .map(|i| y[(start + t * i as f32 / 64.0) as usize])
-            .sum::<f32>()
-            / 64.0;
-        let got = grid.dc[b] * divisor; // the grid is normalised, the source is not
-        assert!(
-            (got - want).abs() < 0.02 * want.abs().max(0.05),
-            "bucket {b}: grid mean {got}, source mean {want}"
-        );
-        assert!(want.abs() > 0.05, "the test source should have a mean at all");
-    }
+        assert!(!out.is_empty());
 
-    /// Synth mode has no source to follow: no playback grid, and the contour
-    /// keeps driving the pitch exactly as before.
-    #[test]
-    fn synth_mode_has_no_playback_grid() {
-        let engine = SynthComputeEngine::new(Arc::new(LeSynthParams::default()));
-        engine.shared_params.set_execution_mode(ExecutionMode::Synth);
-        assert!(playback_grid(&engine.shared_params).is_none());
-    }
-
-    /// A *steady* harmonic-rich tone: no vibrato, no envelope, so a correct
-    /// transposition is a perfectly periodic waveform at the key's period and
-    /// everything else the renderer produces is its own error.
-    fn steady(sr: f32, f0: f32, secs: f32) -> Vec<f32> {
-        let n = (sr * secs) as usize;
-        (0..n)
-            .map(|i| {
-                let w = TWO_PI * f0 * i as f32 / sr;
-                0.35 * (1..=12).map(|k| (1.0 / k as f32) * (w * k as f32 + 0.7 * k as f32).sin()).sum::<f32>()
-            })
-            .collect()
-    }
-
-    /// How far the render is from being periodic at `period` samples, in dB
-    /// (RMS of `x[i] - x[i-period]` against RMS of `x`), over the steady middle.
-    /// A step at a bucket boundary is aperiodic; a correctly transposed steady
-    /// tone is not.
-    fn aperiodicity_db(x: &[f32], period: usize) -> f64 {
-        let a = period * 4;
-        let b = x.len().saturating_sub(period * 4);
-        if b <= a + period {
-            return f64::NAN;
-        }
-        let (mut e, mut r) = (0.0f64, 0.0f64);
-        for i in a..b {
-            let d = x[i] as f64 - x[i - period] as f64;
-            e += d * d;
-            r += (x[i] as f64) * (x[i] as f64);
-        }
-        10.0 * (e.max(1e-300) / r.max(1e-300)).log10()
-    }
-
-    /// Worst sample-to-sample step, over the median one — a click reads here
-    /// even when it is too short to move an RMS figure.
-    fn step_ratio(x: &[f32]) -> f64 {
-        let mut d: Vec<f64> = x.windows(2).map(|w| (w[1] - w[0]).abs() as f64).collect();
-        let max = d.iter().cloned().fold(0.0f64, f64::max);
-        d.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let med = d[d.len() / 2].max(1e-12);
-        max / med
-    }
-
-    /// How far a render is from *the* correct transposition of [`steady`], in dB.
-    ///
-    /// The source is a fixed harmonic series, so its transposition onto a key is
-    /// known in closed form: the same series at the key's frequency, with the
-    /// same relative phases, at whatever absolute phase and level the renderer
-    /// happens to start at. Both of those are fitted out, and what is left is
-    /// error — the metric a key's fuzz has to be judged by, since a lag-based
-    /// one cannot tell a rendered period apart from the period it assumed.
-    fn vs_ideal_db(x: &[f32], sr: f32, f_key: f32) -> f64 {
-        let n = x.len();
-        let ideal = |psi: f64| -> Vec<f64> {
-            (0..n)
-                .map(|i| {
-                    let w = 2.0 * std::f64::consts::PI * f_key as f64 * i as f64 / sr as f64;
-                    (1..=12)
-                        .map(|k| (1.0 / k as f64) * (w * k as f64 + 0.7 * k as f64 + k as f64 * psi).sin())
-                        .sum::<f64>()
-                })
+        // Project each rendered cycle onto sin(2 pi k pos) to recover harmonic
+        // k's amplitude in that cycle.
+        let per_cycle_amp = |k: usize| -> Vec<f64> {
+            let mut cycles = 0.0f64;
+            let mut acc: Vec<(f64, usize)> = vec![(0.0, 0); nb];
+            for &v in out.iter() {
+                let c = cycles as usize;
+                if c >= nb {
+                    break;
+                }
+                let pos = cycles - cycles.floor();
+                let e = &mut acc[c];
+                e.0 += v as f64 * (std::f64::consts::TAU * k as f64 * pos).sin();
+                e.1 += 1;
+                cycles += 1.0 / (base_period / ratios[c]).max(2.0) as f64;
+            }
+            acc.iter()
+                .filter(|(_, n)| *n > 0)
+                .map(|(s, n)| 2.0 * s / *n as f64)
                 .collect()
         };
-        // The absolute phase is the one free parameter; scan then refine.
-        let score = |psi: f64| -> f64 {
-            let want = ideal(psi);
-            let (mut num, mut den) = (0.0f64, 0.0f64);
-            for i in 0..n {
-                num += x[i] as f64 * want[i];
-                den += want[i] * want[i];
-            }
-            let g = if den > 0.0 { num / den } else { 0.0 };
-            let (mut e, mut r) = (0.0f64, 0.0f64);
-            for i in 0..n {
-                let d = x[i] as f64 - g * want[i];
-                e += d * d;
-                r += (g * want[i]) * (g * want[i]);
-            }
-            10.0 * (e.max(1e-300) / r.max(1e-300)).log10()
+        let range = |a: &[f64]| {
+            (
+                a.iter().cloned().fold(f64::INFINITY, f64::min),
+                a.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+            )
         };
-        let mut best = (f64::MAX, 0.0f64);
-        let steps = 400;
-        for i in 0..steps {
-            let psi = 2.0 * std::f64::consts::PI * i as f64 / steps as f64;
-            let s = score(psi);
-            if s < best.0 {
-                best = (s, psi);
-            }
-        }
-        let mut step = 2.0 * std::f64::consts::PI / steps as f64;
-        for _ in 0..40 {
-            step *= 0.5;
-            for psi in [best.1 - step, best.1 + step] {
-                let s = score(psi);
-                if s < best.0 {
-                    best = (s, psi);
-                }
-            }
-        }
-        best.0
-    }
 
-    #[test]
-    #[ignore = "measurement, not an assertion: cargo test -- --ignored --nocapture"]
-    fn measure_playback_grid_cost() {
-        let sr = 44_100.0;
-        // 3 s of a 150 Hz source: ~450 buckets, the shape of a real subtrack.
-        let engine = SynthComputeEngine::new(Arc::new(LeSynthParams::default()));
-        engine.shared_params.update_sample_rate(sr);
-        let t0 = std::time::Instant::now();
-        engine.analyze_and_load(&steady(sr, 150.0, 3.0), sr, 150.0, &[], 0);
-        let analysed = t0.elapsed();
-        let nb = engine.shared_params.amplitude_data.lock().unwrap()[0].len();
-        engine.shared_params.playback_grid_dirty.store(true, Ordering::Relaxed);
-        let t1 = std::time::Instant::now();
-        let _ = playback_grid(&engine.shared_params).unwrap();
-        let built = t1.elapsed();
-        let t2 = std::time::Instant::now();
-        let _ = playback_grid(&engine.shared_params).unwrap();
-        println!("  {nb} buckets: analyse+load {analysed:?}, playback grid {built:?}, cached {:?}", t2.elapsed());
-    }
+        let safe = per_cycle_amp(k_safe);
+        let (slo, shi) = range(&safe);
+        println!("k={k_safe:3} (safely under the cap): min {slo:.4}, max {shi:.4} of 0.1");
+        assert!(
+            slo > 0.09 && shi < 0.11,
+            "harmonic {k_safe} sits below the cap for every period in this note, so \
+             it must render at its grid amplitude on every cycle — got {slo:.4}..{shi:.4}"
+        );
 
-    #[test]
-    #[ignore = "measurement, not an assertion: cargo test -- --ignored --nocapture"]
-    fn measure_transposed_key_fidelity() {
-        let sr = 44_000.0; // keys 36/48/60 land on 200/100/50-sample periods
-        for (src_f, name) in [(293.66f32, "D4 source"), (110.0, "A2 source")] {
-            let engine = SynthComputeEngine::new(Arc::new(LeSynthParams::default()));
-            engine.shared_params.update_sample_rate(sr);
-            engine.analyze_and_load(&steady(sr, src_f, 0.5), sr, src_f, &[], 0);
-            println!("\n{name} ({src_f} Hz), {} buckets", engine.shared_params.amplitude_data.lock().unwrap()[0].len());
-            for (key, hz) in [(36usize, 220.0f32), (48, 440.0), (60, 880.0)] {
-                let period = (sr / hz) as usize;
-                let x = engine.assemble_buffer_for_key(key);
-                // The ends carry the note's own fade, so judge the middle.
-                let mid = &x[x.len() / 4..x.len() / 2];
-                // A fit over one window punishes a constant detune as if it were
-                // noise, so report the best over a ±0.1 % pitch scan too: if the
-                // gap is there, what is left is tuning, not roughness.
-                let mut tuned = (f64::MAX, 0.0f32);
-                for i in -60i32..=60 {
-                    let off = i as f32 * 1e-6;
-                    let s = vs_ideal_db(mid, sr, hz * (1.0 + off));
-                    if s < tuned.0 {
-                        tuned = (s, off);
-                    }
-                }
-                println!(
-                    "  key {key:>2} ({hz:>5.0} Hz, {:+.2} st): vs ideal {:>7.2} dB | aperiodicity {:>7.2} dB | worst step / median {:>6.1}x | tuned {:>7.2} dB at {:+.3} cent",
-                    12.0 * (hz / src_f).log2(),
-                    vs_ideal_db(mid, sr, hz),
-                    aperiodicity_db(&x, period),
-                    step_ratio(&x),
-                    tuned.0,
-                    1200.0 * (1.0 + tuned.1).log2(),
-                );
-            }
-        }
-    }
-
-    /// **The requirement.** A source whose period is not a whole number of
-    /// samples — which is nearly every source — must transpose onto a key
-    /// without the roughness the rounding used to cost.
-    ///
-    /// The source here is a steady 12-harmonic tone of 149.83 samples, so the
-    /// correct render at any key is a perfectly periodic waveform and every
-    /// departure from one is the renderer's. Measured against that ideal, and
-    /// against itself one period earlier:
-    ///
-    /// | key | before | after |
-    /// |---|---|---|
-    /// | 5 semitones down | −32.8 / −29.5 dB | **−62.1 / −73.7 dB** |
-    /// | 7 up | −27.1 / −28.1 | **−56.5 / −74.6** |
-    /// | 19 up | −21.3 / −27.1 | **−44.3 / −72.4** |
-    ///
-    /// The bounds below sit well inside those, and the same tone with a period
-    /// of a whole 400 samples — which never had the defect — is held to the
-    /// figure it always measured, so a fix that only helps the awkward case
-    /// cannot regress the easy one.
-    ///
-    /// (What remains at 19 semitones up is a **0.03-cent** tuning offset, not
-    /// roughness: correcting for it takes the same render to −75 dB. It comes
-    /// from reading the true period off the bucket lengths, whose total rounds
-    /// once — see [`true_periods`].)
-    #[test]
-    fn a_transposed_key_does_not_inherit_the_bucket_rounding() {
-        let sr = 44_000.0; // keys 36/48/60 land on 200/100/50-sample periods
-        for (src_f, floor) in [(293.66f32, -40.0f64), (110.0, -80.0)] {
-            let engine = SynthComputeEngine::new(Arc::new(LeSynthParams::default()));
-            engine.shared_params.update_sample_rate(sr);
-            engine.analyze_and_load(&steady(sr, src_f, 0.5), sr, src_f, &[], 0);
-            for (key, hz) in [(36usize, 220.0f32), (48, 440.0), (60, 880.0)] {
-                let x = engine.assemble_buffer_for_key(key);
-                assert!(!x.is_empty(), "key {key} must render");
-                let mid = &x[x.len() / 4..x.len() / 2];
-                let ideal = vs_ideal_db(mid, sr, hz);
-                let periodic = aperiodicity_db(&x, (sr / hz) as usize);
-                assert!(
-                    ideal < floor,
-                    "{src_f} Hz on key {key}: {ideal:.1} dB from the ideal transposition"
-                );
-                assert!(
-                    periodic < -60.0,
-                    "{src_f} Hz on key {key}: {periodic:.1} dB of aperiodicity — a steady \
-                     source must transpose to a steady tone"
-                );
-            }
-        }
-    }
-
-    /// The grid a key transposes from must be a clean harmonic series: the
-    /// bucket's own bins are not, because its window is a whole number of
-    /// samples and its period is not, and that difference is what a key hears.
-    #[test]
-    fn the_playback_grid_is_a_clean_harmonic_series() {
-        let sr = 44_000.0;
-        let engine = SynthComputeEngine::new(Arc::new(LeSynthParams::default()));
-        engine.shared_params.update_sample_rate(sr);
-        // 149.83 samples per period: the awkward case.
-        engine.analyze_and_load(&steady(sr, 293.66, 0.5), sr, 293.66, &[], 0);
-        let g = playback_grid(&engine.shared_params).unwrap();
-        let b = 10usize;
-        for k in 1..=12usize {
-            let ratio = g.amplitude[k - 1][b] / g.amplitude[0][b];
-            assert!(
-                (ratio - 1.0 / k as f32).abs() < 1e-4,
-                "harmonic {k} is at {ratio} of the fundamental, expected {}",
-                1.0 / k as f32
-            );
-            // The source's partials share one phase, so their phases relative to
-            // the fundamental are zero — the shape of the waveform, and what a
-            // window that does not close would smear.
-            let rel = (g.phase[k - 1][b] - k as f32 * g.phase[0][b]).rem_euclid(TWO_PI);
-            let rel = if rel > std::f32::consts::PI { rel - TWO_PI } else { rel };
-            assert!(rel.abs() < 1e-3, "harmonic {k}'s relative phase is {rel}");
-        }
-        // And nothing above the source's own partials.
-        for k in 13..=20usize {
-            assert!(
-                g.amplitude[k - 1][b] < 1e-3 * g.amplitude[0][b],
-                "harmonic {k} should be silent, got {}",
-                g.amplitude[k - 1][b]
-            );
-        }
+        let edge = per_cycle_amp(k_edge);
+        let (elo, ehi) = range(&edge);
+        println!("k={k_edge:3} (straddles the cap)   : min {elo:.4}, max {ehi:.4} of 0.1");
+        assert!(
+            ehi - elo < 0.02,
+            "harmonic {k_edge} flaps between cycles ({elo:.4}..{ehi:.4}): the anti-alias \
+             cap is moving mid-note, which amplitude-modulates the top of the band at f0"
+        );
     }
 }
