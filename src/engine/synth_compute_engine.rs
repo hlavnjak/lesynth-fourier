@@ -381,6 +381,11 @@ fn render_key_buffer(
     // numbers in `a_transposed_key_is_not_spliced_out_of_several_buckets` were
     // set. Not a supported setting — a bisection tool.
     let forced_off = std::env::var_os("LESYNTH_NO_PSOLA").is_some();
+    // `LESYNTH_FORCE_PSOLA=1` runs the resynthesis at the source's own pitch
+    // too, where the accumulator normally wins. Nothing is transposed there, so
+    // the output should be the source back again — which makes it the probe for
+    // what the grain pipeline itself loses, with transposition out of the way.
+    let unity = unity && std::env::var_os("LESYNTH_FORCE_PSOLA").is_none();
     if let Some(t) = timing.filter(|_| !unity && !forced_off) {
         return render_psola(
             ampl,
@@ -533,6 +538,24 @@ fn render_psola(
     let mut out = vec![0.0f32; n_out];
     let mut wsum = vec![0.0f32; n_out];
 
+    // How much of a period the grains cross-fade over.
+    //
+    // The textbook figure is a whole period — two-period Hann grains at 50%
+    // overlap — which assumes the signal is locally stationary, so that
+    // averaging a period with its neighbour costs nothing. A voice is not: every
+    // period genuinely differs from the last, and that averaging is a loss.
+    // Measured at the source's own pitch, against the exact inverse, with
+    // nothing transposed: a full period of cross-fade gives -24.5 dB, a tenth of
+    // one -26.1. Transposed to 110 Hz the high band's modulation depth falls
+    // from 0.804 to 0.747, against 0.753 for a true resampling of the same
+    // material. Enough overlap to hide the join, not enough to average the
+    // material away.
+    const DEFAULT_OVERLAP: f64 = 0.15;
+    let overlap: f64 = std::env::var("LESYNTH_OVERLAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_OVERLAP)
+        .clamp(0.0, 1.0);
     let mut cache = CycleCache::default();
     let mut tau = 0.0f64; // the current epoch, in output samples
     let mut epoch = 0usize;
@@ -571,17 +594,28 @@ fn render_psola(
         // The grain spans one period either side of its epoch. `x` is the
         // position within it in cycles, zero at the epoch, ±1 at the edges,
         // which is both the Hann argument and the phase to read the bucket at.
-        let first = (tau - p).ceil() as i64;
-        let last = (tau + p).floor() as i64;
+        let half = overlap * 0.5;
+        let first = (tau - half * p).ceil() as i64;
+        let last = (tau + (1.0 + half) * p).floor() as i64;
         for idx in first..=last {
             if idx < 0 || idx as usize >= n_out {
                 continue;
             }
             let x = (idx as f64 - tau) / p;
-            if x <= -1.0 || x >= 1.0 {
+            if x <= -half || x >= 1.0 + half {
                 continue;
             }
-            let w = 0.5 * (1.0 + (std::f64::consts::PI * x).cos());
+            // Tukey: raised-cosine ramps of width `overlap`, flat between them.
+            // Consecutive grains' ramps are mirror images, so they sum to one.
+            let w = if half <= 0.0 {
+                1.0
+            } else if x < half {
+                0.5 * (1.0 - (std::f64::consts::PI * (x + half) / overlap).cos())
+            } else if x > 1.0 - half {
+                0.5 * (1.0 + (std::f64::consts::PI * (x - 1.0 + half) / overlap).cos())
+            } else {
+                1.0
+            };
             // Read at the grain's own phase. The bucket's phases were baked with
             // its absolute position subtracted (`rot` in `build_playback_grid`),
             // so the table already *is* the source's waveform referenced to a
