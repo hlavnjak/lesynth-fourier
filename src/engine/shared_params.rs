@@ -121,6 +121,15 @@ pub struct SharedParams {
     /// *keyboard* note. Off unless the user asks for it; see
     /// [`zero_key_phases`](Self::zero_key_phases).
     pub zero_key_phases: Arc<AtomicBool>,
+
+    /// The grid keys transpose from, derived from the analysed one — see
+    /// [`PlaybackGrid`](crate::engine::synth_compute_engine::PlaybackGrid). Built
+    /// on first use and rebuilt whenever `playback_grid_dirty` says the analysis
+    /// grid moved under it.
+    pub playback_grid: Arc<Mutex<Option<Arc<crate::engine::PlaybackGrid>>>>,
+    /// Set by [`mark_all_buffers_dirty`](Self::mark_all_buffers_dirty), which
+    /// every grid edit already goes through.
+    pub playback_grid_dirty: Arc<AtomicBool>,
 }
 
 impl SharedParams {
@@ -170,6 +179,12 @@ impl SharedParams {
             // what the grid says, and loading one must not silently change how
             // it sounds. The checkbox next to Original Pitch And Gain turns it on.
             zero_key_phases: Arc::new(AtomicBool::new(false)),
+
+            // Off: the cycle table is the cheap path and matches the direct sum
+            // to within its interpolation error. The checkbox trades CPU for
+            // dropping even that.
+            playback_grid: Arc::new(Mutex::new(None)),
+            playback_grid_dirty: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -240,7 +255,10 @@ impl SharedParams {
     /// Mark all buffers as dirty and cancel any ongoing computations
     pub fn mark_all_buffers_dirty(&self) {
         self.computation_cancel.store(true, Ordering::Relaxed);
-        
+        // Every grid edit passes through here, and the grid keys transpose from
+        // is derived from that grid.
+        self.playback_grid_dirty.store(true, Ordering::Relaxed);
+
         let mut buffer_states = self.buffer_states.lock().unwrap();
         for state in buffer_states.iter_mut() {
             if *state != BufferState::Dirty {
