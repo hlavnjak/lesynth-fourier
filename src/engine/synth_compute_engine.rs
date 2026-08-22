@@ -686,6 +686,11 @@ pub struct PlaybackGrid {
     pub periods: Vec<f32>,
     /// The bucket's wall-clock span, in source samples: its recorded length.
     pub spans: Vec<f32>,
+    /// What [`normalize_grid_per_bucket`] divided this grid by while building
+    /// it. A key plays the normalised grid and does not care, but a caller
+    /// reproducing the source's own level has to multiply it back in, and it is
+    /// not the analysis grid's divisor — the two grids differ.
+    pub norm_divisor: f32,
 }
 
 /// The true period of each bucket, in source samples.
@@ -787,6 +792,7 @@ pub fn build_playback_grid(
         dc: out_dc,
         periods,
         spans: lengths.iter().map(|&l| l as f32).collect(),
+        norm_divisor: divisor,
     })
 }
 
@@ -961,6 +967,102 @@ pub fn resynthesize_grid(
         None,
     );
     if let Some(scale) = source_level_scale(display_gain, divisor) {
+        for v in sound.iter_mut() {
+            *v = (*v * scale).clamp(-1.0, 1.0);
+        }
+    }
+    sound
+}
+
+/// Render a key **the way the keyboard does** — through a `PlaybackGrid` and the
+/// source's own two clocks — with no live engine, so an offline tool measures
+/// the path a listener actually hears.
+///
+/// [`resynthesize_grid`] cannot do this: the host bridge it serves passes a
+/// pitch contour and no bucket lengths, so it renders on a uniform time grid
+/// from the analysis grid's rounded buckets. That is a different signal from
+/// what a key plays, and measuring it is how a keyboard defect stays invisible
+/// to an offline dump.
+///
+/// * `lengths`/`dc`/`nyq` – the analysis's own, exactly as
+///   [`resynthesize_exact`] takes them (source samples).
+/// * `analysis_rate`/`out_rate` – to place the source's spans on the output
+///   clock; equal rates keep them as they are.
+/// * `base_period` – the key's period in **output** samples, fractional.
+/// * `base_freq` – the analysis fundamental, to scale each bucket's true period
+///   onto the key.
+///
+/// Falls back to [`resynthesize_grid`] when the grid carries no usable lengths,
+/// which is exactly when a key does too.
+#[allow(clippy::too_many_arguments)]
+pub fn resynthesize_key(
+    amplitude: &[Vec<f32>],
+    phase: &[Vec<f32>],
+    lengths: &[usize],
+    dc: &[f32],
+    nyq: &[f32],
+    pitch_ratio: &[f32],
+    base_period: f32,
+    base_freq: f32,
+    analysis_rate: f32,
+    out_rate: f32,
+    max_harmonic: usize,
+    target_samples: usize,
+    display_gain: f32,
+) -> Vec<f32> {
+    let num_harmonics = amplitude.len();
+    let num_buckets = amplitude.first().map(|r| r.len()).unwrap_or(0);
+    if num_harmonics == 0 || num_buckets == 0 {
+        return Vec::new();
+    }
+    let nominal = analysis_rate / base_freq.max(1e-6);
+    let grid = if lengths.len() == num_buckets
+        && base_freq > 0.0
+        && analysis_rate > 0.0
+        && out_rate > 0.0
+        && nominal >= 2.0
+    {
+        build_playback_grid(amplitude, phase, lengths, dc, nyq, pitch_ratio)
+    } else {
+        None
+    };
+    let Some(grid) = grid else {
+        return resynthesize_grid(
+            amplitude,
+            phase,
+            pitch_ratio,
+            base_period,
+            max_harmonic,
+            target_samples,
+            display_gain,
+        );
+    };
+
+    // The same two clocks `key_timing` derives for a live key, from the same
+    // grid: the bucket's true period transposed onto the key, and its span put
+    // on the output rate.
+    let rate = out_rate / analysis_rate;
+    let periods: Vec<f32> =
+        grid.periods.iter().map(|&t| (base_period * t / nominal).max(2.0)).collect();
+    let spans: Vec<f32> = grid.spans.iter().map(|&l| (l * rate).max(1.0)).collect();
+
+    // `build_playback_grid` has already normalised, so re-normalising here would
+    // find nothing to do and lose the divisor that restores the source's level.
+    let enabled = vec![true; num_harmonics];
+    let mut sound = render_key_buffer(
+        num_harmonics,
+        &grid.amplitude,
+        &grid.phase,
+        &enabled,
+        &enabled,
+        base_period.max(2.0),
+        if max_harmonic == 0 { num_harmonics } else { max_harmonic },
+        pitch_ratio,
+        Some(&BucketTiming { periods: &periods, spans: &spans, dc: &grid.dc }),
+        target_samples,
+        None,
+    );
+    if let Some(scale) = source_level_scale(display_gain, grid.norm_divisor) {
         for v in sound.iter_mut() {
             *v = (*v * scale).clamp(-1.0, 1.0);
         }

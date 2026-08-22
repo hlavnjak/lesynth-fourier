@@ -784,6 +784,100 @@ pub unsafe extern "C" fn lesynth_fourier_resynthesize(
     sound.len() as i64
 }
 
+/// Render a grid **the way a key on the keyboard does** — through the plugin's
+/// `PlaybackGrid` and the source's own two clocks.
+///
+/// This is what [`lesynth_fourier_resynthesize`] cannot be: that one takes a
+/// pitch contour and no bucket lengths, so it renders the analysis grid's
+/// *rounded* buckets on a uniform time grid. A key does neither, so an offline
+/// dump made through it measures a signal nobody listens to — which is how a
+/// keyboard defect stays invisible to the buzz tooling. Feed this one to
+/// `tools/buzzscan.py` instead when the question is "why does a key buzz".
+///
+/// Inputs are [`lesynth_fourier_resynthesize_exact`]'s, plus the key: `amp` and
+/// `phase` row-major `[h * num_buckets + b]`, `bucket_lengths` in the file's own
+/// samples, `dc`/`nyquist` optional. `base_period` is the key's period in
+/// **output** samples, fractional; `base_freq` and `analysis_rate` describe the
+/// analysis, `out_rate` the render.
+///
+/// Returns the sample count, writing `min(produced, out_cap)` when `out` is
+/// non-null; negative on bad arguments. Falls back to the contour path when the
+/// lengths are missing, which is when a key does too.
+///
+/// # Safety
+/// `amp`/`phase` must point to `num_harmonics * num_buckets` valid `f32`s;
+/// `bucket_lengths` to `num_buckets` valid `u32`s; `pitch_ratio`, `dc` and
+/// `nyquist`, if non-null, to `num_buckets` valid `f32`s; `out`, if non-null, to
+/// `out_cap` writable ones.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn lesynth_fourier_resynthesize_key(
+    num_harmonics: usize,
+    num_buckets: usize,
+    amp: *const f32,
+    phase: *const f32,
+    bucket_lengths: *const u32,
+    dc: *const f32,
+    nyquist: *const f32,
+    pitch_ratio: *const f32,
+    base_period: f32,
+    base_freq: f32,
+    analysis_rate: f32,
+    out_rate: f32,
+    max_harmonic: usize,
+    target_samples: usize,
+    display_gain: f32,
+    out: *mut f32,
+    out_cap: usize,
+) -> i64 {
+    if amp.is_null() || phase.is_null() || bucket_lengths.is_null() {
+        return -1;
+    }
+    if num_harmonics == 0 || num_buckets == 0 || !(base_period >= 2.0) {
+        return -2;
+    }
+    let amp = std::slice::from_raw_parts(amp, num_harmonics * num_buckets);
+    let phase = std::slice::from_raw_parts(phase, num_harmonics * num_buckets);
+    let lens: Vec<usize> = std::slice::from_raw_parts(bucket_lengths, num_buckets)
+        .iter()
+        .map(|&v| v as usize)
+        .collect();
+    let opt = |p: *const f32| -> Vec<f32> {
+        if p.is_null() {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(p, num_buckets).to_vec()
+        }
+    };
+    let dc = opt(dc);
+    let nyq = opt(nyquist);
+    // A flat contour is the honest default: the bucket's own true period already
+    // carries the source's pitch movement.
+    let ratio = if pitch_ratio.is_null() {
+        vec![1.0f32; num_buckets]
+    } else {
+        std::slice::from_raw_parts(pitch_ratio, num_buckets).to_vec()
+    };
+
+    let amplitude: Vec<Vec<f32>> = (0..num_harmonics)
+        .map(|h| amp[h * num_buckets..(h + 1) * num_buckets].to_vec())
+        .collect();
+    let phase_v: Vec<Vec<f32>> = (0..num_harmonics)
+        .map(|h| phase[h * num_buckets..(h + 1) * num_buckets].to_vec())
+        .collect();
+
+    let sound = engine::resynthesize_key(
+        &amplitude, &phase_v, &lens, &dc, &nyq, &ratio, base_period, base_freq,
+        analysis_rate, out_rate, max_harmonic, target_samples, display_gain,
+    );
+
+    if !out.is_null() {
+        let n = sound.len().min(out_cap);
+        std::slice::from_raw_parts_mut(out, n).copy_from_slice(&sound[..n]);
+    }
+    sound.len() as i64
+}
+
 /// Serialises tests that touch process-global bridge state — the untargeted
 /// inbox and `PENDING_TOKEN` (where a concurrent `prepare_instance` would
 /// otherwise be claimed by the wrong test's instance). Poison is ignored: a
