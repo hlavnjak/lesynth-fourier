@@ -928,27 +928,16 @@ pub unsafe extern "C" fn lesynth_fourier_render_key_live(
     } else {
         std::slice::from_raw_parts(contour, contour_len)
     };
-    let max_buckets = (crate::constants::NUM_OF_BUCKETS_MAX as usize).max(num_buckets);
-    let mut result = engine::analyze_subtrack(
-        slice,
-        sample_rate,
-        base_freq,
-        contour,
-        num_buckets,
-        num_harmonics,
-        max_buckets,
-    );
-    engine::normalize_for_display(&mut result, 0.9);
-
-    // A real engine, driven the way the editor drives it.
+    // A real engine, driven the way the editor drives it: `analyze_and_load`,
+    // not `load_analysis`. Only the former records the source duration, and
+    // without it a key renders one cycle per bucket instead of the source's own
+    // seconds — a different note, and until this was fixed a different render
+    // path as well.
+    let _ = num_harmonics;
     let params = std::sync::Arc::new(crate::params::LeSynthParams::default());
     let eng = engine::SynthComputeEngine::new(params);
-
-    *eng.shared_params.analysis_sample_rate.lock().unwrap() = sample_rate;
-    *eng.shared_params.analysis_base_freq.lock().unwrap() = base_freq;
     eng.shared_params.update_sample_rate(out_sample_rate);
-    eng.shared_params.set_execution_mode(engine::ExecutionMode::Analysis);
-    eng.load_analysis(&result);
+    eng.analyze_and_load(slice, sample_rate, base_freq, contour, num_buckets);
 
     let sound = eng.assemble_buffer_for_key(key);
     if !out_used_playback_grid.is_null() {

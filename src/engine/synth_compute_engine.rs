@@ -296,9 +296,20 @@ fn render_key_buffer(
         return Vec::new();
     }
     let drive_by_time = target_samples > 0;
-    // The source's own timing only applies to a note laid on a wall clock; the
-    // Synth timeline is one cycle per bucket and has no source to follow.
-    let timing = timing.filter(|t| drive_by_time && t.describes(num_buckets));
+    // The two clocks are gated separately, because only one of them needs a wall
+    // clock.
+    //
+    // `timing` is the **pitch**: each bucket's true period, which is the whole
+    // point of the `PlaybackGrid` and is right on any timeline. Gating it on
+    // `drive_by_time` — as this did — threw the true periods away whenever
+    // `target_samples` was 0 and silently rendered the rounded bucket lengths
+    // instead, which is the buzz the grid exists to remove.
+    //
+    // `walk` is the **wall clock**: following the source's spans at its own
+    // speed. That genuinely needs a duration to lay the note on, so a Synth
+    // timeline (one cycle per bucket) has no use for it.
+    let timing = timing.filter(|t| t.describes(num_buckets));
+    let walk = timing.filter(|_| drive_by_time);
 
     let mut sound: Vec<f32> = Vec::with_capacity(if drive_by_time { target_samples } else { 0 });
     let mut cache = CycleCache::default();
@@ -346,7 +357,7 @@ fn render_key_buffer(
         }
 
         // ── Which bucket, and how long is its cycle ──────────────────────────
-        let next = match timing {
+        let next = match walk {
             // Source-timed: the bucket is where we are *along the source*, and
             // its cycle is its own period. The two advance separately — that is
             // what lets a key hold the source's duration while playing another
@@ -403,7 +414,7 @@ fn render_key_buffer(
         sound.push((sample + dc).clamp(-1.0, 1.0));
 
         cycles += 1.0 / period as f64;
-        if let Some(t) = timing {
+        if let Some(t) = walk {
             // Past the last bucket, hold it: the analysed material can fall a
             // fraction of a period short of the duration, and stopping there
             // would leave the note shorter on some keys than others.
@@ -1626,7 +1637,10 @@ impl SynthComputeEngine {
             _ => (&ampl_data_normalized, &phase_data),
         };
         // Record which of the two it was: falling back is silent, and it sounds
-        // like the defect the grid exists to remove.
+        // like the defect the grid exists to remove. This must be what the
+        // *renderer* ends up using, not what is offered to it — reporting the
+        // offer showed "true-period grid" while `render_key_buffer` discarded it
+        // and rendered the rounded lengths anyway.
         self.shared_params
             .used_playback_grid
             .store(playback.is_some() && timing.is_some(), Ordering::Relaxed);
@@ -3437,6 +3451,51 @@ mod keyboard_fidelity {
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         println!("synchronous key render: {ms:.1} ms for {} samples at {sr:.0} Hz", out.len());
         assert!(!out.is_empty());
+    }
+
+    /// The true periods are the **pitch**, and a pitch does not need a wall
+    /// clock. `render_key_buffer` used to gate the whole `BucketTiming` on
+    /// `drive_by_time`, so a note with no recorded duration — a Synth timeline,
+    /// or an analysis that never set one — silently rendered each bucket at its
+    /// *rounded* length instead, which is the buzz the `PlaybackGrid` exists to
+    /// remove. Only the wall-clock walk needs the duration.
+    #[test]
+    fn the_true_periods_survive_a_note_with_no_duration() {
+        let sr = 24_000.0f32;
+        let (engine, _src) = analysed(sr, 440.0, 0.03);
+        engine.shared_params.update_sample_rate(sr);
+        let grid = playback_grid(&engine.shared_params).expect("an analysed grid has one");
+        let base_period = engine.shared_params.piano_periods.lock().unwrap()[48];
+        let (periods, spans) = key_timing(&grid, &engine.shared_params, base_period).unwrap();
+        let enabled = vec![true; grid.amplitude.len()];
+        let ratios = engine.shared_params.bucket_pitch_ratio.lock().unwrap().clone();
+        let timing = BucketTiming { periods: &periods, spans: &spans, dc: &grid.dc };
+
+        // target_samples = 0: the Synth timeline, one cycle per bucket.
+        let with_timing = render_key_buffer(
+            grid.amplitude.len(), &grid.amplitude, &grid.phase, &enabled, &enabled,
+            base_period, NUM_HARMONICS, &ratios, Some(&timing), 0, None,
+        );
+        let without = render_key_buffer(
+            grid.amplitude.len(), &grid.amplitude, &grid.phase, &enabled, &enabled,
+            base_period, NUM_HARMONICS, &ratios, None, 0, None,
+        );
+        assert!(!with_timing.is_empty());
+
+        // The true periods are fractional and the rounded ones are not, so a
+        // note built from them cannot come out the same length. If it does, the
+        // timing was thrown away.
+        let db = err_db(&with_timing, &without);
+        println!(
+            "one cycle per bucket: with the true periods {} samples, without {} ({db:.1} dB apart)",
+            with_timing.len(),
+            without.len()
+        );
+        assert!(
+            db > -60.0,
+            "with no duration the renderer produced the same audio with and without \
+             the true periods ({db:.1} dB) — it discarded them"
+        );
     }
 
     /// A key press must never play audio rendered from a **different grid**.
