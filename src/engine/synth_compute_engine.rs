@@ -1032,11 +1032,36 @@ pub fn build_playback_grid(
             // into the renderer's sine one, then rotated back to the shared phase
             // origin so every bucket reads at the same running phase.
             let ph = x.im.atan2(x.re) + std::f32::consts::FRAC_PI_2;
-            out_phase[k - 1][b] = ph - TWO_PI * k as f32 * (rot as f32);
+            // Only the *fraction* of a cycle matters: a whole cycle rotates
+            // every harmonic by a multiple of 2π. Keeping the whole part costs
+            // precision that grows through the note — `rot` reaches the bucket
+            // count (267 on a 2.5 s voice), and `2π·k·rot` for the top harmonic
+            // is then a six-figure f32 whose last bits are worth ~0.01 rad. The
+            // error is zero at the start and largest at the end, which is heard
+            // as a fuzz that comes in partway through and gets worse.
+            // `rot` is a whole number of cycles by construction (one period per
+            // bucket), and a whole cycle rotates every harmonic by a multiple of
+            // 2π, so there is nothing to subtract.
+            out_phase[k - 1][b] = ph;
         }
-        rotations[b] = rot.rem_euclid(1.0) as f32;
-        rot += lengths[b] as f64 / t;
-        start += lengths[b] as f64;
+        // Advance by the **true** period, not by the recorded length.
+        //
+        // The two differ by the rounding the length carries, and the renderer
+        // places its grains a true period apart. Cutting them a recorded length
+        // apart therefore hands each grain material from a slightly different
+        // place than where it is played, by an amount that walks through the
+        // note — so consecutive grains no longer join, and every join is a step.
+        // Steps at the period rate are broadband: the 4-6 kHz band, where this
+        // voice is 36 dB down, came out *above* the source and got worse toward
+        // the end of the note, which is where the walk is largest.
+        //
+        // Advancing by `t` makes the cut and the placement the same thing.
+        // Consecutive grains are then consecutive periods of the source, they
+        // join exactly, and each bucket begins a whole cycle after the last —
+        // so the phase origin below is an integer and the rotation vanishes.
+        rotations[b] = 0.0;
+        rot += 1.0;
+        start += t;
     }
 
     // Where the source's own spectrum ends. A recording rolls off smoothly or
@@ -1067,12 +1092,15 @@ pub fn build_playback_grid(
             *v /= divisor;
         }
     }
+    let spans_out = periods.clone();
     Some(PlaybackGrid {
         amplitude: out_amp,
         phase: out_phase,
         dc: out_dc,
         periods,
-        spans: lengths.iter().map(|&l| l as f32).collect(),
+        // The bucket now occupies exactly its own true period of the source, so
+        // that is its wall-clock span too.
+        spans: spans_out,
         rotations,
         usable_harmonics,
         norm_divisor: divisor,
