@@ -96,6 +96,9 @@ impl Plugin for LeSynth {
         let shared = &self.synth_compute_engine.shared_params;
         let fade_duration = shared.fade_duration;
         let repeat_playback = shared.repeat_playback();
+        // Read once per block, not per sample: it is a slider, not an envelope,
+        // and the lock has no business in the inner loop.
+        let keyboard_gain = shared.keyboard_gain();
 
         // --- Handle incoming MIDI events (build/stop voices) ---
         // Wake the idle editor once after the batch if any voice changed.
@@ -169,7 +172,7 @@ impl Plugin for LeSynth {
 
                 let mut mixed = 0.0f32;
 
-                for opt in voices.iter_mut() {
+                for (slot, opt) in voices.iter_mut().enumerate() {
                     if let Some(v) = opt.as_mut() {
                         let len = v.buffer.len();
                         if len == 0 {
@@ -193,6 +196,15 @@ impl Plugin for LeSynth {
 
                         // Apply per-voice scaling FIRST to prevent intermediate clipping
                         s *= voice_gain;
+
+                        // The keyboard's own level. Not applied to Original
+                        // Pitch And Gain: that audition is meant to be A/B'd
+                        // against the source file at the source's own level, and
+                        // a gain on it would make it a different reference every
+                        // time the slider moved.
+                        if slot != ORIGINAL_PITCH_VOICE {
+                            s *= keyboard_gain;
+                        }
 
                         // Fade in
                         if v.fade_in_active && v.fade_in_pos < fade_duration {

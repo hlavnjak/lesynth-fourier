@@ -16,7 +16,9 @@ use std::sync::Arc;
 use nih_plug_egui::egui::{Color32, CornerRadius, StrokeKind, Stroke, Vec2, Pos2, Rect, pos2};
 use crate::constants::NUM_KEYS;
 use crate::engine::SynthComputeEngine;
-use crate::engine::shared_params::{BufferState, ORIGINAL_PITCH_VOICE};
+use crate::engine::shared_params::{
+    BufferState, KEYBOARD_GAIN_MAX_DB, KEYBOARD_GAIN_MIN_DB, ORIGINAL_PITCH_VOICE,
+};
 use crate::voice::Voice;
 
 /// Where a key is drawn, and therefore where it is clicked. One function for
@@ -245,6 +247,44 @@ pub fn draw_piano_keyboard(
             // Every key buffer was rendered with the old setting.
             shared.mark_all_buffers_dirty();
             synth_compute_engine.update_assembled_chart_with_key24();
+        }
+
+        // How loud the keyboard plays. A mixdown gain, not a render setting:
+        // nothing is recomputed and no key buffer goes dirty, so it takes
+        // effect on the note already sounding.
+        ui.separator();
+        let mut gain_db = synth_compute_engine.shared_params.keyboard_gain_db();
+        // Narrower than egui's default: this row is a strip of small controls
+        // and a full-width slider would push the status text onto a second line
+        // on any window that is not wide.
+        let slider_width = ui.spacing().slider_width;
+        ui.spacing_mut().slider_width = 90.0;
+        let gain_resp = ui
+            .add(
+                nih_plug_egui::egui::Slider::new(
+                    &mut gain_db,
+                    KEYBOARD_GAIN_MIN_DB..=KEYBOARD_GAIN_MAX_DB,
+                )
+                .suffix(" dB")
+                .text("Keyboard gain")
+                .custom_formatter(|v, _| {
+                    if v as f32 <= KEYBOARD_GAIN_MIN_DB {
+                        "-∞".to_string()
+                    } else {
+                        format!("{v:+.1}")
+                    }
+                }),
+            )
+            .on_hover_text(
+                "How loud notes played from the keyboard are in the mix.                  0 dB is unity — what the keyboard has always played — and the                  bottom of the slider is silence, not a very quiet note.
+
+                 Never applied to Original Pitch And Gain: that audition plays                  at the source's own level so it can be compared with the                  source file directly, and a gain on it would make it a                  different reference every time this moved.
+
+                 Nothing is re-rendered, so it takes effect on the note already                  sounding.",
+            );
+        ui.spacing_mut().slider_width = slider_width;
+        if gain_resp.changed() {
+            synth_compute_engine.shared_params.set_keyboard_gain_db(gain_db);
         }
 
         // How a key is rendering, right now. `build_playback_grid` answers

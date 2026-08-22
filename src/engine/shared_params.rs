@@ -21,6 +21,13 @@ use crate::voice::Voice;
 /// Voice slot for the "Original" audition. Past the piano keys, so auditioning
 /// never steals a key's voice and nothing treating a slot as a key can reach it.
 pub const ORIGINAL_PITCH_VOICE: usize = NUM_KEYS;
+
+/// Quietest the keyboard gain slider goes, in dB — and an exact zero rather
+/// than a level, so the slider can turn the keyboard off.
+pub const KEYBOARD_GAIN_MIN_DB: f32 = -60.0;
+/// Loudest the keyboard gain slider goes, in dB. The mixdown clamps the final
+/// sum either way, so this only bounds how far a note can be pushed into it.
+pub const KEYBOARD_GAIN_MAX_DB: f32 = 12.0;
 /// Length of [`SharedParams::voices`]: one per key plus the original-pitch slot.
 pub const VOICE_SLOTS: usize = NUM_KEYS + 1;
 
@@ -122,6 +129,11 @@ pub struct SharedParams {
     /// [`zero_key_phases`](Self::zero_key_phases).
     pub zero_key_phases: Arc<AtomicBool>,
 
+    /// Level of the keyboard's own notes at the mixdown, in decibels — see
+    /// [`keyboard_gain`](Self::keyboard_gain). Held in dB because that is what
+    /// the slider moves in: converting back and forth would let a drag drift.
+    pub keyboard_gain_db: Arc<Mutex<f32>>,
+
     /// The grid keys transpose from, derived from the analysed one — see
     /// [`PlaybackGrid`](crate::engine::synth_compute_engine::PlaybackGrid). Built
     /// on first use and rebuilt whenever `playback_grid_dirty` says the analysis
@@ -186,6 +198,10 @@ impl SharedParams {
             // it sounds. The checkbox next to Original Pitch And Gain turns it on.
             zero_key_phases: Arc::new(AtomicBool::new(false)),
 
+            // Unity: the keyboard sounds exactly as it did until the slider is
+            // moved.
+            keyboard_gain_db: Arc::new(Mutex::new(0.0)),
+
             // Off: the cycle table is the cheap path and matches the direct sum
             // to within its interpolation error. The checkbox trades CPU for
             // dropping even that.
@@ -224,6 +240,36 @@ impl SharedParams {
     /// Set whether a keyboard note renders with all phases zeroed.
     pub fn set_zero_key_phases(&self, zero: bool) {
         self.zero_key_phases.store(zero, Ordering::Relaxed);
+    }
+
+    /// The keyboard's level, in decibels. `0.0` is unity;
+    /// [`KEYBOARD_GAIN_MIN_DB`] is silence.
+    pub fn keyboard_gain_db(&self) -> f32 {
+        *self.keyboard_gain_db.lock().unwrap()
+    }
+
+    /// Set the keyboard's level in decibels, clamped to the slider's range.
+    pub fn set_keyboard_gain_db(&self, db: f32) {
+        *self.keyboard_gain_db.lock().unwrap() =
+            db.clamp(KEYBOARD_GAIN_MIN_DB, KEYBOARD_GAIN_MAX_DB);
+    }
+
+    /// The keyboard's level as a linear factor, for the mixdown.
+    ///
+    /// Applied to notes played from the keyboard **only**, never to Original
+    /// Pitch And Gain: that audition exists to be A/B'd against the source file
+    /// at the source's own level, and a gain on it would make it a different
+    /// reference every time the slider moved.
+    ///
+    /// The bottom of the range is exactly zero rather than -60 dB of residual,
+    /// so the slider has a real off position.
+    pub fn keyboard_gain(&self) -> f32 {
+        let db = self.keyboard_gain_db();
+        if db <= KEYBOARD_GAIN_MIN_DB {
+            0.0
+        } else {
+            10f32.powf(db / 20.0)
+        }
     }
 
     /// Whether the last key render transposed from a `PlaybackGrid` rather than
@@ -306,7 +352,33 @@ impl SharedParams {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    /// The keyboard gain slider: unity by default, so nothing about the
+    /// keyboard changes until it is moved, and a real off position at the
+    /// bottom rather than -60 dB of residual.
+    #[test]
+    fn the_keyboard_gain_is_unity_until_it_is_moved() {
+        let p = SharedParams::new(8, 50);
+        assert_eq!(p.keyboard_gain_db(), 0.0);
+        assert_eq!(p.keyboard_gain(), 1.0);
+
+        p.set_keyboard_gain_db(6.0);
+        assert!((p.keyboard_gain() - 1.9953).abs() < 1e-3, "{}", p.keyboard_gain());
+
+        p.set_keyboard_gain_db(-6.0);
+        assert!((p.keyboard_gain() - 0.5012).abs() < 1e-3, "{}", p.keyboard_gain());
+
+        p.set_keyboard_gain_db(KEYBOARD_GAIN_MIN_DB);
+        assert_eq!(p.keyboard_gain(), 0.0, "the bottom of the slider must be silence");
+
+        // Out of range in either direction is clamped, not wrapped or ignored.
+        p.set_keyboard_gain_db(-200.0);
+        assert_eq!(p.keyboard_gain_db(), KEYBOARD_GAIN_MIN_DB);
+        p.set_keyboard_gain_db(200.0);
+        assert_eq!(p.keyboard_gain_db(), KEYBOARD_GAIN_MAX_DB);
+    }
 
     #[test]
     fn test_shared_params_new() {
