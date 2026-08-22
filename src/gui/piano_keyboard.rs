@@ -288,11 +288,10 @@ pub fn draw_piano_keyboard(
         }
 
         // How a key is rendering, right now. `build_playback_grid` answers
-        // anything it cannot use with `None`, and the renderer then falls back
-        // to the contour path — same call, same signature, and the buzz the
-        // true-period grid exists to remove comes straight back. Nothing about
-        // that is visible from outside, which is exactly how it went unnoticed
-        // while offline dumps measured clean. So it is reported here.
+        // anything it cannot use with `None` and the renderer falls back to the
+        // contour path — same call, same signature, and the buzz the true-period
+        // grid exists to remove comes straight back. Invisible from outside,
+        // which is how it went unnoticed while offline dumps measured clean.
         if has_analysis {
             let on_grid = synth_compute_engine.shared_params.used_playback_grid();
             let (text, colour, hover) = if on_grid {
@@ -436,23 +435,16 @@ pub fn draw_piano_keyboard(
         key_rects.push((key_idx, key_rect));
     }
 
-    // Which key was pressed, taken from the raw press events rather than from a
-    // `Response`.
+    // Which key was pressed, from the raw press events rather than a `Response`.
     //
-    // `is_pointer_button_down_on()` was the wrong instrument: egui clears that
+    // `is_pointer_button_down_on()` is the wrong instrument: egui clears that
     // flag for any widget that also saw a *release* in the same frame
-    // (`context.rs`, `PointerEvent::Released`), so a click that began and ended
-    // between two repaints was invisible to it and the note was silently
-    // dropped — no voice, and therefore no blue key either, which is how it was
-    // spotted. egui says as much on `any_pressed`: "This can sometimes return
-    // true even if `any_down() == false` because a press can be shorter than one
-    // frame." The editor repaints only on input, so the window for that is wide
-    // — and widest right after a note starts, when the frame is busy, which is
-    // why it showed up when moving quickly from one held key to the next.
-    //
-    // `press_origin()` is no help either: it is cleared on release. The raw
-    // `Event::PointerButton` carries the position the press happened at and is
-    // never retracted, so that is what the keys are hit-tested against.
+    // (`context.rs`, `PointerEvent::Released`), so a click shorter than one
+    // repaint was invisible to it and the note was dropped — no voice, and no
+    // blue key either, which is how it was spotted. egui says as much on
+    // `any_pressed`. `press_origin()` is no help either, being cleared on
+    // release; the raw `Event::PointerButton` carries the press position and is
+    // never retracted.
     let mut pressed_this_frame: Option<usize> = None;
     for event in &input.events {
         if let nih_plug_egui::egui::Event::PointerButton {
@@ -547,14 +539,10 @@ pub fn draw_piano_keyboard(
             last_pressed_key = Some(key_idx);
             last_pressed_key_persist = Some(key_idx);
         }
-        // A click that was already over before this frame was drawn still has
-        // to be let go, or the note it just started would never stop. Carrying
-        // it to the next frame rather than fading it here also gives it a
-        // frame of sound — the shortest a click that spans two frames gets.
-        //
-        // The repaint has to be asked for: the editor only redraws on input, so
-        // a click followed by stillness would otherwise never reach the frame
-        // that lets the note go.
+        // A click already over before this frame was drawn still has to be let
+        // go, or the note it started would never stop. Carrying it to the next
+        // frame also gives it a frame of sound, the least a two-frame click gets.
+        // The repaint must be asked for: the editor redraws only on input.
         pending_release = if released { Some(key_idx) } else { None };
         if pending_release.is_some() {
             egui_ctx.request_repaint();

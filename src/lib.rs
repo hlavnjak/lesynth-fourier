@@ -24,18 +24,14 @@ pub use plugin::LeSynth;
 // ───────────────────────────────────────────────────────────────────────────
 // Host-facing C ABI bridge (Analysis execution mode)
 //
-// The host DAW loads this same shared object (it is both the VST3 plugin and a
-// plain cdylib). These exported functions let the host feed recorded audio
-// "subtracks" to the plugin for Fourier analysis. Because the host's VST3
-// component instances live in *this* shared object's address space, the host can
-// hand a job straight to one of them: it addresses a job to the instance it
-// tagged (see the registry below), the job waits in that instance, and that
-// instance's editor claims it and runs the analysis on its own engine.
+// The host loads this same shared object (it is both the VST3 plugin and a plain
+// cdylib), so it can hand an analysis job straight to one of its own component
+// instances: it addresses the job to an instance it tagged, the job waits there,
+// and that instance's editor claims it.
 //
-// Everything here is keyed per instance rather than global, because a host can
-// have several editors open at once (one per track). A shared "active editor"
-// or shared inbox lets whichever editor happens to paint first swallow another
-// instance's job, so the track the host meant to fill comes up with empty charts.
+// Everything is keyed **per instance**, never global: with several editors open,
+// a shared inbox lets whichever paints first swallow another instance's job and
+// the track the host meant to fill comes up empty.
 // ───────────────────────────────────────────────────────────────────────────
 
 use std::collections::VecDeque;
@@ -70,12 +66,10 @@ pub(crate) fn claim_analysis_job() -> Option<AnalysisJob> {
 // ───────────────────────────────────────────────────────────────────────────
 // Per-instance registry (state save/load)
 //
-// The host loads a saved LeSynth track, or exports the live grid a user edited,
-// against a *specific* plugin instance. Because several editors can be open at
-// once, the global "active editor" model isn't enough. Instead the host tags an
-// instance before creating it (`lesynth_fourier_prepare_instance`); the plugin's
-// `Default::default()` claims the pending token and registers a weak handle to
-// its compute engine here, so the host can later address that exact instance.
+// Save/load addresses a *specific* instance, which a global "active editor"
+// cannot do with several editors open. The host tags an instance before creating
+// it (`lesynth_fourier_prepare_instance`); `Default::default()` claims the
+// pending token and registers a weak handle to its engine here.
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Token the host set for the next instance to be created; taken by `default()`.
@@ -144,13 +138,11 @@ pub extern "C" fn lesynth_fourier_prepare_instance(token: u64) {
     set_pending_token(token);
 }
 
-/// Report the dimensions and metadata of a tagged instance's current grid, so
-/// the host can size its buffers before calling [`lesynth_fourier_export_grid`].
-/// `out_display_gain` is the display normalisation the grid carries (`0.0` =
-/// unknown); save it with the grid or the source's absolute level is lost and a
-/// reloaded track can only be auditioned at the grid's own level.
-/// Returns 0 on success, or a negative value if the token is unknown/dead. Any
-/// out pointer may be null (that field is then skipped).
+/// Report a tagged instance's grid dimensions and metadata, so the host can size
+/// its buffers before [`lesynth_fourier_export_grid`]. `out_display_gain` is the
+/// display normalisation the grid carries (`0.0` = unknown) — save it, or the
+/// source's absolute level is lost. Returns 0, or negative for an unknown/dead
+/// token. Any out pointer may be null.
 ///
 /// # Safety
 /// Each non-null out pointer must be valid for a single write of its type.
@@ -202,11 +194,10 @@ pub unsafe extern "C" fn lesynth_fourier_export_dims(
     0
 }
 
-/// Copy a tagged instance's live grid into host buffers sized for `nh * nb`
-/// (amp/phase) and `nb` (pitch ratio) — the `nh`/`nb` returned by
-/// [`lesynth_fourier_export_dims`]. Values outside the current grid are written
-/// as 0 (amp/phase) or 1.0 (ratio), so a grid that shrank between the two calls
-/// never overflows the host buffers. Returns `nb`, or negative on error.
+/// Copy a tagged instance's live grid into host buffers sized `nh * nb`
+/// (amp/phase) and `nb` (ratio), from [`lesynth_fourier_export_dims`]. Cells
+/// outside the current grid are written 0 / 1.0, so a grid that shrank between
+/// the two calls cannot overflow. Returns `nb`, or negative on error.
 ///
 /// # Safety
 /// `out_amp`/`out_phase` must each be valid for `nh * nb` writes and
@@ -269,13 +260,11 @@ pub unsafe extern "C" fn lesynth_fourier_export_grid(
 }
 
 /// Load a saved grid into a tagged instance (Analysis mode), bypassing DFT
-/// analysis. `amp`/`phase` are row-major `[h*nb + b]`; `pitch_ratio` is `nb`
-/// long. `sample_rate` is accepted for format completeness but not applied — the
-/// instance keeps the host device rate so playback duration stays correct.
-/// `display_gain` is the value [`lesynth_fourier_export_dims`] reported when the
-/// grid was saved; `0.0` (unknown) leaves the Original Pitch And Gain audition
-/// at the grid's own level instead of restoring the source's.
-/// Returns 0 on success, negative on error.
+/// analysis. `amp`/`phase` are row-major `[h*nb + b]`, `pitch_ratio` is `nb`
+/// long. `sample_rate` is accepted but not applied — the instance keeps the host
+/// device rate so playback duration stays right. `display_gain` is what
+/// [`lesynth_fourier_export_dims`] reported when the grid was saved; `0.0` leaves
+/// the audition at the grid's own level. Returns 0, or negative on error.
 ///
 /// # Safety
 /// `amp`/`phase` must point to `nh * nb` valid `f32`s and `pitch_ratio` to `nb`.
@@ -356,14 +345,12 @@ pub unsafe extern "C" fn lesynth_fourier_import_grid(
     0
 }
 
-/// Push a subtrack to be analysed by the instance tagged with `token` (see
-/// [`lesynth_fourier_prepare_instance`]). The job waits in that instance alone,
-/// so it is still there when its editor opens and cannot be swallowed by another
-/// open editor. Returns 0 on success, or a negative value on bad input (-1) or
-/// an unknown/dead token (-2).
+/// Push a subtrack to be analysed by the instance tagged with `token`. The job
+/// waits in that instance alone, so another open editor cannot swallow it.
+/// Returns 0, `-1` on bad input, `-2` on an unknown/dead token.
 ///
-/// `contour`/`contour_len` are the host's per-position fundamental (absolute Hz,
-/// uniformly resampled across the subtrack); pass `null`/`0` for flat (legacy).
+/// `contour`/`contour_len` are the per-position fundamental in Hz, uniformly
+/// resampled across the subtrack; `null`/`0` is flat.
 ///
 /// # Safety
 /// `samples` must point to `len` valid `f32`s; `contour`, if non-null, to
@@ -405,12 +392,11 @@ pub unsafe extern "C" fn lesynth_fourier_push_analysis_to(
 /// Push a subtrack to be analysed by the next available plugin instance.
 /// Returns the new queue depth (0 on invalid input).
 ///
-/// **Legacy — prefer [`lesynth_fourier_push_analysis_to`].** The job is not
-/// addressed to any instance, so with several editors open whichever paints
-/// first claims it, and the instance the host meant to fill stays empty.
+/// **Legacy — prefer [`lesynth_fourier_push_analysis_to`].** Unaddressed, so
+/// with several editors open whichever paints first claims it.
 ///
-/// `contour`/`contour_len` are the host's per-position fundamental (absolute Hz,
-/// uniformly resampled across the subtrack); pass `null`/`0` for flat (legacy).
+/// `contour`/`contour_len` are the per-position fundamental in Hz, uniformly
+/// resampled across the subtrack; `null`/`0` is flat.
 ///
 /// # Safety
 /// `samples` must point to `len` valid `f32`s; `contour`, if non-null, to
@@ -453,12 +439,11 @@ pub unsafe extern "C" fn lesynth_fourier_push_analysis(
 
 /// Stateless harmonic analysis, for the host's own preview plotting.
 ///
-/// Writes `num_harmonics * num_buckets` floats (row-major, `[h*num_buckets+b]`)
-/// into `out_amp` and `out_phase`. Returns the number of buckets written, or a
-/// negative value on bad arguments.
+/// Writes `num_harmonics * num_buckets` floats (row-major) into `out_amp` and
+/// `out_phase`. Returns the bucket count, or negative on bad arguments.
 ///
-/// `contour`/`contour_len` are the host's per-position fundamental (absolute Hz,
-/// uniformly resampled across the subtrack); pass `null`/`0` for flat (legacy).
+/// `contour`/`contour_len` are the per-position fundamental in Hz, uniformly
+/// resampled across the subtrack; `null`/`0` is flat.
 /// `num_buckets` is the fixed grid the caller allocated for (must be > 0 here,
 /// since the output buffers are sized to it).
 ///
@@ -514,21 +499,17 @@ pub unsafe extern "C" fn lesynth_fourier_analyze(
     nb as i64
 }
 
-/// Full harmonic analysis: the amp/phase grids *plus* the per-bucket pitch
-/// ratio, bucket period and non-harmonic bins that [`lesynth_fourier_analyze`]
-/// drops. Exactly what `SynthComputeEngine::analyze_and_load` performs, display
-/// normalisation included, so a host can reproduce the plugin's grid.
+/// Full harmonic analysis: the amp/phase grids *plus* the per-bucket pitch ratio,
+/// bucket period and non-harmonic bins that [`lesynth_fourier_analyze`] drops —
+/// exactly what `analyze_and_load` performs, display normalisation included.
 ///
-/// `out_display_gain` receives that normalisation's gain
-/// (`grid_amplitude = source_amplitude × gain`); pass it back to reproduce the
-/// source's own absolute level, or a quiet recording plays ~19 dB hot.
+/// `out_display_gain` receives that gain (`grid = source × gain`); pass it back
+/// or a quiet recording plays ~19 dB hot.
 ///
-/// The bucket count is derived from the source, so use the **two-call
-/// protocol**: call with the grid out pointers null to get `nb`, allocate, then
-/// call again with `cap_buckets = nb`. The analysis is deterministic.
-///
-/// Returns `nb`, or a negative value: `-1` bad arguments, `-3` `cap_buckets`
-/// smaller than the grid the analysis produced (nothing is written).
+/// The bucket count comes from the source, so use the **two-call protocol**:
+/// call with the grid pointers null to get `nb`, allocate, call again with
+/// `cap_buckets = nb`. Returns `nb`; `-1` bad arguments, `-3` `cap_buckets` too
+/// small (nothing written).
 ///
 /// * `num_buckets` – fixed bucket count, or `0` for period-synchronous (what the
 ///   plugin itself uses).
@@ -638,20 +619,16 @@ pub unsafe extern "C" fn lesynth_fourier_analyze_full(
     nb as i64
 }
 
-/// Reproduce the analysed source exactly, inverting the grid bucket by bucket
-/// ([`engine::resynthesize_exact`]) — the counterpart of
-/// [`lesynth_fourier_analyze_full`] and the one to use for "play the source
-/// back". Output length is `Σ bucket_lengths × rate_ratio`. Use
-/// [`lesynth_fourier_resynthesize`] to hear the grid *transposed* onto a key,
-/// which has to resample and cannot be exact.
+/// Reproduce the analysed source exactly, inverting the grid bucket by bucket —
+/// the counterpart of [`lesynth_fourier_analyze_full`] and the one for "play the
+/// source back". Output length `Σ bucket_lengths × rate_ratio`. Use
+/// [`lesynth_fourier_resynthesize`] for a *transposed* key, which must resample.
 ///
 /// `amp`/`phase` are row-major `[h * num_buckets + b]`; `dc`/`nyquist` may be
-/// null, at the accuracy cost. `display_gain` is divided back out for the
-/// source's own absolute level (`0` = leave the grid's level alone).
-///
-/// `rate_ratio` is `output_rate / analysis_rate`; `1.0` reproduces the source
-/// exactly. `bucket_lengths` are in the *file's* sample rate, so a stream at any
-/// other rate needs this or the note plays at the wrong pitch and length.
+/// null, at the accuracy cost; `display_gain` is divided back out for the
+/// source's own level (`0` = leave the grid's). `rate_ratio` is
+/// `output_rate / analysis_rate` — `bucket_lengths` are in the *file's* rate, so
+/// any other rate needs it or the note plays at the wrong pitch and length.
 ///
 /// # Safety
 /// `amp`/`phase` must point to `num_harmonics * num_buckets` valid `f32`s;
@@ -718,20 +695,16 @@ pub unsafe extern "C" fn lesynth_fourier_resynthesize_exact(
 /// ([`engine::resynthesize_grid`] → `render_key_buffer`), with no instance
 /// involved, so a host can regression-test what a note actually sounds like.
 ///
-/// `amp`/`phase` are row-major `[h * num_buckets + b]`; `pitch_ratio` is
-/// `num_buckets` long. Pass `base_period = sample_rate / base_freq` **unrounded**
-/// — the renderer carries a fractional phase accumulator, and rounding here is
-/// the tuning error it exists to avoid.
+/// `amp`/`phase` are row-major `[h * num_buckets + b]`, `pitch_ratio` is
+/// `num_buckets` long. Pass `base_period` **unrounded** — the renderer carries a
+/// fractional phase accumulator, and rounding here is the tuning error it exists
+/// to avoid. `max_harmonic` is an anti-alias cap (`0` = the `period/2` limit),
+/// `target_samples` `0` for one period per bucket and `> 0` for "preserve
+/// seconds", `display_gain` non-zero for the source's own level.
 ///
-/// Returns the sample count produced: with `out` null it renders without
-/// writing, so a caller can size its buffer; otherwise it writes
-/// `min(produced, out_cap)` and still returns the full length. Negative on bad
-/// arguments.
-///
-/// * `max_harmonic`   – anti-alias cap; `0` → only the `period / 2` limit.
-/// * `target_samples` – `0` = one period per bucket; `> 0` = "preserve seconds".
-/// * `display_gain`   – non-zero renders at the source's own absolute level
-///   (what Original Pitch And Gain plays); `0` at the grid's own level.
+/// Returns the sample count: with `out` null it renders without writing so a
+/// caller can size its buffer, otherwise it writes `min(produced, out_cap)` and
+/// still returns the full length. Negative on bad arguments.
 ///
 /// # Safety
 /// `amp`/`phase` must point to `num_harmonics * num_buckets` valid `f32`s and
@@ -787,22 +760,16 @@ pub unsafe extern "C" fn lesynth_fourier_resynthesize(
 /// Render a grid **the way a key on the keyboard does** — through the plugin's
 /// `PlaybackGrid` and the source's own two clocks.
 ///
-/// This is what [`lesynth_fourier_resynthesize`] cannot be: that one takes a
-/// pitch contour and no bucket lengths, so it renders the analysis grid's
-/// *rounded* buckets on a uniform time grid. A key does neither, so an offline
-/// dump made through it measures a signal nobody listens to — which is how a
-/// keyboard defect stays invisible to the buzz tooling. Feed this one to
-/// `tools/buzzscan.py` instead when the question is "why does a key buzz".
+/// What [`lesynth_fourier_resynthesize`] cannot be: that one renders the analysis
+/// grid's *rounded* buckets on a uniform time grid, a signal nobody listens to —
+/// which is how a keyboard defect stays invisible to the buzz tooling.
 ///
-/// Inputs are [`lesynth_fourier_resynthesize_exact`]'s, plus the key: `amp` and
-/// `phase` row-major `[h * num_buckets + b]`, `bucket_lengths` in the file's own
-/// samples, `dc`/`nyquist` optional. `base_period` is the key's period in
-/// **output** samples, fractional; `base_freq` and `analysis_rate` describe the
-/// analysis, `out_rate` the render.
-///
-/// Returns the sample count, writing `min(produced, out_cap)` when `out` is
-/// non-null; negative on bad arguments. Falls back to the contour path when the
-/// lengths are missing, which is when a key does too.
+/// Inputs are [`lesynth_fourier_resynthesize_exact`]'s plus the key:
+/// `base_period` is the key's period in **output** samples, fractional;
+/// `base_freq`/`analysis_rate` describe the analysis, `out_rate` the render.
+/// Returns the sample count, writing `min(produced, out_cap)`; negative on bad
+/// arguments. Falls back to the contour path when the lengths are missing, which
+/// is when a key does too.
 ///
 /// # Safety
 /// `amp`/`phase` must point to `num_harmonics * num_buckets` valid `f32`s;
@@ -883,20 +850,15 @@ pub unsafe extern "C" fn lesynth_fourier_resynthesize_key(
 /// pressed — so an offline dump measures the integration and not just the
 /// renderer.
 ///
-/// [`lesynth_fourier_resynthesize_key`] calls the pure function with a
-/// `PlaybackGrid` built by hand. That proves the *renderer* is sound and proves
-/// nothing about whether a running plugin ever reaches it: the live path builds
-/// its grid from `SharedParams`, and if any of the pieces the analysis is
-/// supposed to leave there is missing or the wrong length, `build_playback_grid`
-/// returns `None` and the key silently falls back to the contour renderer that
-/// buzzes. That fallback is invisible from outside — same call, same signature,
-/// different signal — which is what this entry point exists to expose.
+/// [`lesynth_fourier_resynthesize_key`] hands the pure function a `PlaybackGrid`
+/// built by hand, which proves the *renderer* sound and nothing about whether a
+/// running plugin reaches it: the live path builds its grid from `SharedParams`
+/// and, if anything is missing or the wrong length, silently falls back to the
+/// contour renderer that buzzes — same call, same signature, different signal.
 ///
-/// Analyses `samples` exactly as the editor's own "analyse" does, loads the
-/// result into a fresh engine, and renders `key`. `out_used_playback_grid`, if
-/// non-null, reports whether the live path actually built the grid: `0` means
-/// the key fell back, and the audio is the old path whatever the renderer can
-/// do.
+/// Analyses `samples` as the editor does, loads it into a fresh engine and
+/// renders `key`. `out_used_playback_grid` reports whether the grid was actually
+/// built: `0` means the key fell back.
 ///
 /// # Safety
 /// `samples` must point to `len` valid `f32`s; `contour`, if non-null, to

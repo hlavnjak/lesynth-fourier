@@ -95,12 +95,10 @@ pub struct SharedParams {
     pub normalization_needed: Arc<Mutex<bool>>,
     pub harmonic_ampl_enabled: Arc<Mutex<Vec<bool>>>,
     pub harmonic_phase_enabled: Arc<Mutex<Vec<bool>>>,
-    /// Per-harmonic "use my custom Synth-mode curve instead of the analysed one"
-    /// flags, for Analysis mode (amplitude / phase, independently). Default
-    /// `false` everywhere so freshly loaded analysis data plays back as analysed
-    /// and plain Synth mode is unaffected. When a flag is `true`, the harmonic's
-    /// `amplitude_data` / `phase_data` row is overwritten by the user's Synth
-    /// curve (Constant / Nested Fourier); when cleared it is restored from
+    /// Per-harmonic "use my Synth curve instead of the analysed row" flags
+    /// (amplitude / phase, independently). `false` everywhere by default, so
+    /// loaded analysis data plays back as analysed. Set, the row is overwritten
+    /// by the user's Synth curve; cleared, it is restored from
     /// [`Self::analysis_amplitude_data`] / [`Self::analysis_phase_data`].
     pub harmonic_ampl_custom: Arc<Mutex<Vec<bool>>>,
     pub harmonic_phase_custom: Arc<Mutex<Vec<bool>>>,
@@ -223,16 +221,12 @@ impl SharedParams {
 
     /// Whether a *keyboard* note renders every bucket with zero phase.
     ///
-    /// A bucket is one period, and its phases are the ones the source had at its
-    /// own pitch. Played on a key the period is a different length, so the
-    /// waveform no longer meets itself at the cycle boundary and every bucket
-    /// change steps the signal — an audible click/clip at the period borders.
-    /// Zeroing the phases makes every harmonic a sine of the fundamental, which
-    /// is zero at both ends of the cycle, so consecutive buckets join
-    /// continuously. It costs the source's waveform shape, not its spectrum.
-    ///
-    /// Never applied to the Original Pitch And Gain audition, which plays at the
-    /// pitch the phases belong to and must stay an exact reproduction.
+    /// A bucket's phases are the ones the source had at *its* pitch, so on a key
+    /// the waveform no longer meets itself at the cycle boundary and every bucket
+    /// change steps the signal. Zeroing them makes every harmonic a sine of the
+    /// fundamental, zero at both ends, so consecutive buckets join — at the cost
+    /// of the waveform's shape, not its spectrum. Never applied to Original Pitch
+    /// And Gain, which must stay an exact reproduction.
     pub fn zero_key_phases(&self) -> bool {
         self.zero_key_phases.load(Ordering::Relaxed)
     }
@@ -254,15 +248,11 @@ impl SharedParams {
             db.clamp(KEYBOARD_GAIN_MIN_DB, KEYBOARD_GAIN_MAX_DB);
     }
 
-    /// The keyboard's level as a linear factor, for the mixdown.
-    ///
-    /// Applied to notes played from the keyboard **only**, never to Original
-    /// Pitch And Gain: that audition exists to be A/B'd against the source file
-    /// at the source's own level, and a gain on it would make it a different
-    /// reference every time the slider moved.
-    ///
-    /// The bottom of the range is exactly zero rather than -60 dB of residual,
-    /// so the slider has a real off position.
+    /// The keyboard's level as a linear factor, for the mixdown. Applied to
+    /// keyboard notes **only**, never to Original Pitch And Gain — that audition
+    /// is A/B'd against the source file at its own level, and a gain would make
+    /// it a different reference every time the slider moved. The bottom of the
+    /// range is exactly zero, so the slider has a real off position.
     pub fn keyboard_gain(&self) -> f32 {
         let db = self.keyboard_gain_db();
         if db <= KEYBOARD_GAIN_MIN_DB {
@@ -319,15 +309,12 @@ impl SharedParams {
         self.playback_grid_dirty.store(true, Ordering::Relaxed);
 
         let mut buffer_states = self.buffer_states.lock().unwrap();
-        // **Drop the audio too, not just the flag.** These buffers were rendered
-        // from the grid that has just been replaced, and `get_buffer_for_key`
-        // hands a dirty key's old buffer straight to a voice rather than make
-        // the audio thread render. Loading a source therefore played the grid
-        // from *before* the load — at startup the default Synth patch, whose
-        // harmonics 11..256 sit at 0.05 and buzz — until the background thread
-        // caught up, which is 88 keys away and restarts on every edit. It sounds
-        // exactly like a synthesis defect and is invisible to every offline
-        // render, because the renderer was never asked.
+        // **Drop the audio too, not just the flag.** `get_buffer_for_key` hands a
+        // dirty key's old buffer straight to a voice rather than make the audio
+        // thread render, so a key played the grid from *before* the load — at
+        // startup the default Synth patch, whose harmonics 11..256 sit at 0.05
+        // and buzz. It sounds exactly like a synthesis defect and is invisible to
+        // every offline render, because the renderer was never asked.
         let mut key_buffers = self.key_buffers.lock().unwrap();
         for buffer in key_buffers.iter_mut() {
             *buffer = None;

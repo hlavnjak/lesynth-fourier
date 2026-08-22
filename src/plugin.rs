@@ -197,11 +197,10 @@ impl Plugin for LeSynth {
                         // Apply per-voice scaling FIRST to prevent intermediate clipping
                         s *= voice_gain;
 
-                        // The keyboard's own level. Not applied to Original
-                        // Pitch And Gain: that audition is meant to be A/B'd
-                        // against the source file at the source's own level, and
-                        // a gain on it would make it a different reference every
-                        // time the slider moved.
+                        // The keyboard's own level. Never Original Pitch And
+                        // Gain: that audition is A/B'd against the source file at
+                        // its own level, and a gain would make it a different
+                        // reference every time the slider moved.
                         if slot != ORIGINAL_PITCH_VOICE {
                             s *= keyboard_gain;
                         }
@@ -382,11 +381,8 @@ impl Plugin for LeSynth {
                         synth_compute_engine.shared_params.set_execution_mode(mode);
                         ui.add_space(10.0);
 
-                        // Whether analysed input audio is loaded. When it is, the grid
-                        // resolution comes from the source and the bucket count must not
-                        // be overridden, so the Buckets slider (drawn inside the Harmonic
-                        // Editor below) is disabled. `analysis_duration_secs > 0` is the
-                        // "analysis data present" flag.
+                        // Analysed audio loaded? Then the grid resolution comes from the
+                        // source and the Buckets slider must not override it.
                         let has_analysis = *synth_compute_engine
                             .shared_params
                             .analysis_duration_secs
@@ -430,14 +426,11 @@ impl Plugin for LeSynth {
                         };
                         section(ui, editor_title, |ui| {
                         if mode == ExecutionMode::Synth {
-                        // The harmonic list is NUM_HARMONICS (256) rows, each a heavy
-                        // block of sliders/combos/nested-Fourier controls. egui is
-                        // immediate-mode and baseview re-runs this whole closure ~66x/sec,
-                        // so building all 256 rows every frame pegs a CPU core even when
-                        // the editor is idle. Virtualize with `show_rows` so only the rows
-                        // scrolled into view are built. The rows are uniform height: learn
-                        // it at runtime from the per-row stride and cache it in egui memory
-                        // (converges after one frame; never changes afterwards).
+                        // 256 rows of heavy controls, rebuilt every frame by an
+                        // immediate-mode GUI, peg a CPU core even when idle. `show_rows`
+                        // builds only what is scrolled into view; the uniform row height
+                        // is learned from the per-row stride and cached in egui memory
+                        // (converges after one frame).
                         let row_h_id = egui::Id::new("harmonic_row_height");
                         let cached_row_h: f32 = egui_ctx
                             .memory(|m| m.data.get_temp(row_h_id))
@@ -632,11 +625,9 @@ impl Plugin for LeSynth {
                         ui.add_space(10.0);
 
                         // ── Live harmonics ────────────────────────────────────────
-                        // The Buckets control (envelope time-resolution) lives in this
-                        // section's caption row, roughly centred, so it shares the
-                        // caption's height and never grows the section. It is disabled
-                        // when input sound is loaded (the grid resolution then follows
-                        // the source and must not be overridden).
+                        // Buckets (envelope time-resolution) sits in the caption row so it
+                        // never grows the section, and is disabled while input sound is
+                        // loaded.
                         let buckets_header = |ui: &mut egui::Ui| {
                             let applied_id = egui::Id::new("applied_num_buckets");
                             // Apply a restored param value to the grid once on open so

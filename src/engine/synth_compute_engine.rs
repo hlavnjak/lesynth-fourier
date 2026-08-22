@@ -38,11 +38,9 @@ fn bucket_pitch_ratios(shared_params: &SharedParams) -> Vec<f32> {
     }
 }
 
-/// Resample a per-bucket envelope row to `new_len` buckets by linear
-/// interpolation over the normalized position `t = bucket / len` (matching the
-/// `t = bucket / num_buckets` convention the curve fills use). Preserves the
-/// row's shape at a new time-resolution without regenerating it from params, so
-/// an all-zero (untouched) row stays all-zero. Empty source → zeros.
+/// Resample a per-bucket envelope row to `new_len` buckets, linearly over
+/// `t = bucket / len` (the convention the curve fills use). Preserves the row's
+/// shape without regenerating it from params, so an untouched row stays zero.
 fn resample_row(src: &[f32], new_len: usize) -> Vec<f32> {
     if new_len == 0 {
         return Vec::new();
@@ -217,9 +215,8 @@ fn build_cycle_table(
 }
 
 /// Cycle-table length: a power of two whose Nyquist sits
-/// [`CYCLE_TABLE_OVERSAMPLE`]× above `max_h`. Sized from `max_h` alone — the
-/// read step does not affect accuracy, only the kernel's width relative to the
-/// top harmonic, so demanding `4 × period` too just bought a bigger transform.
+/// [`CYCLE_TABLE_OVERSAMPLE`]× above `max_h`. Sized from `max_h` alone — accuracy
+/// follows the kernel's width relative to the top harmonic, not the read step.
 fn cycle_table_len(max_h: usize) -> usize {
     (2 * CYCLE_TABLE_OVERSAMPLE * (max_h + 1))
         .max(16)
@@ -249,34 +246,22 @@ fn read_cycle(table: &[f32], pos: f32) -> f32 {
 }
 
 /// Render a key's waveform from an amp/phase grid — the single render path for
-/// Synth and Analysis modes and for both the GUI and background callers, which
-/// must not diverge. Transposes, so it resamples; use
-/// [`resynthesize_exact`] when the target is the source's own pitch.
+/// every mode and caller, so they cannot diverge. It transposes, so it
+/// resamples; use [`resynthesize_exact`] at the source's own pitch.
 ///
-/// A **fractional phase accumulator** drives it: `cycles` counts fundamental
-/// cycles in `f64`, advancing by `1 / bucket_period` per sample, and the
-/// waveform is read at the fractional position within the cycle. Emitting whole
-/// samples per cycle instead forced a whole-number period and detuned every note
-/// (~36 cents resynthesised, ~75 at the top of the keyboard). The bucket is
-/// re-selected only at a cycle boundary, so cycles stay phase-continuous.
+/// A **fractional** phase accumulator drives it (`cycles` in `f64`, `+1/period`
+/// per sample): a whole-sample period detuned every note by ~36 cents, ~75 at
+/// the top of the keyboard. Buckets are stepped, not blended — they share one
+/// phase origin and are one true period each, so a cross-fade only blurs the
+/// period-to-period variation that on speech is the signal (worth 1 dB).
 ///
-/// **Buckets are stepped, not blended.** Their waveforms are already aligned to
-/// one phase origin and are one true period each ([`PlaybackGrid`]), so
-/// neighbours differ only by what the source did between them — measured at −75
-/// dB on a steady tone, where a cross-fade bought 1 dB and would blur the
-/// period-to-period variation that on speech is the signal.
-///
-/// `target_samples`: `0` = Synth timeline, one cycle per bucket. `> 0` =
-/// Analysis "preserve seconds", render that many samples and pick each cycle's
-/// bucket by position in time, so a note lasts the source's duration at every
-/// key. `cancel` lets the background thread bail out and yield.
+/// `target_samples`: `0` = one cycle per bucket (Synth timeline); `> 0` =
+/// "preserve seconds", so a note lasts the source's duration at every key.
+/// `cancel` lets the background thread bail out and yield.
 ///
 /// `timing` is the source's own clocks ([`BucketTiming`]), present whenever the
-/// grid came from an analysis. It replaces both `ratios` *and* the uniform time
-/// grid: a cycle is rendered at the bucket's true period and the bucket for a
-/// given moment is found by walking the source at wall-clock speed, rather than
-/// by dividing the timeline into equal parts. `None` falls back to `ratios`,
-/// which is what Synth mode and pre-v3 grids use.
+/// grid came from an analysis; it replaces `ratios` *and* the uniform time grid.
+/// `None` falls back to `ratios` — Synth mode and pre-v3 grids.
 fn render_key_buffer(
     num_harmonics: usize,
     ampl: &[Vec<f32>],
@@ -295,29 +280,19 @@ fn render_key_buffer(
         return Vec::new();
     }
     let drive_by_time = target_samples > 0;
-    // The two clocks are gated separately, because only one of them needs a wall
-    // clock.
-    //
-    // `timing` is the **pitch**: each bucket's true period, which is the whole
-    // point of the `PlaybackGrid` and is right on any timeline. Gating it on
-    // `drive_by_time` — as this did — threw the true periods away whenever
-    // `target_samples` was 0 and silently rendered the rounded bucket lengths
-    // instead, which is the buzz the grid exists to remove.
-    //
-    // `walk` is the **wall clock**: following the source's spans at its own
-    // speed. That genuinely needs a duration to lay the note on, so a Synth
-    // timeline (one cycle per bucket) has no use for it.
+    // The two clocks gate separately: `timing` is the *pitch* (right on any
+    // timeline), `walk` is the *wall clock* (needs a duration). Gating the pitch
+    // on `drive_by_time` silently rendered the rounded bucket lengths whenever
+    // `target_samples` was 0 — the buzz the grid exists to remove.
     let timing = timing.filter(|t| t.describes(num_buckets));
     let walk = timing.filter(|_| drive_by_time);
 
     let mut sound: Vec<f32> = Vec::with_capacity(if drive_by_time { target_samples } else { 0 });
     let mut cache = CycleCache::default();
 
-    // Waveform phase, in cycles, and (in source-timed mode) position along the
-    // source, in buckets. Both `f64`: they accumulate for the whole note, and at
-    // 4 kHz and 44.1 kHz an f32 mantissa would start losing sub-sample
-    // resolution within a second, reintroducing the very detuning the fractional
-    // accumulator exists to avoid.
+    // Waveform phase in cycles, and position along the source in buckets. Both
+    // `f64`: they accumulate for the whole note, and an f32 mantissa loses
+    // sub-sample resolution within a second — the detuning this exists to avoid.
     let mut cycles = 0.0f64;
     let mut along = 0.0f64;
     let mut last_cycle = usize::MAX;
@@ -327,20 +302,12 @@ fn render_key_buffer(
     let mut ramp = 0.0f32;
     let mut last_yield = 0usize;
 
-    // Anti-alias cap: harmonic k lands at k / period cycles per sample, so it
-    // must stay below Nyquist (k < period / 2). Taken **once**, from the
-    // shortest period the note will use, and held for the whole note.
-    //
-    // Deriving it per bucket instead let vibrato walk `floor(period / 2)` across
-    // an integer mid-note, switching the top harmonics off and on at the bucket
-    // boundary — full-depth amplitude modulation of the top of the band, gated
-    // at the cycle rate, which is a buzz. It survives zeroing the phases,
-    // because it is not a phase effect: that is how it was finally noticed,
-    // after the phase-domain suspects were ruled out. A note with 3% vibrato
-    // moved the cap at a third of its bucket boundaries.
-    //
-    // Holding the cap costs a harmonic or two of bandwidth on the longest
-    // periods, which is inaudible. The flapping was not.
+    // Anti-alias cap (k < period/2), taken **once** from the shortest period the
+    // note will use. Per bucket, vibrato walks `floor(period/2)` across an
+    // integer mid-note and switches the top harmonics on and off at the bucket
+    // rate — full-depth AM, a buzz, and one that survives zeroing the phases
+    // because it is not a phase effect. A 3% vibrato moved it at a third of the
+    // boundaries. Holding it costs a harmonic or two, which is inaudible.
     let min_period = (0..num_buckets)
         .map(|b| match timing {
             Some(t) => t.periods[b].max(2.0),
@@ -354,21 +321,13 @@ fn render_key_buffer(
         // holds fitted noise, and rendering noise periodically makes it a tone.
         .min(timing.map(|t| t.usable_harmonics).unwrap_or(usize::MAX));
 
-    // With the source's own periods in hand, synthesise pitch-synchronously:
-    // one grain per output period, overlapped at the boundaries. The
-    // accumulator below cannot transpose coherently — see [`render_psola`] —
-    // and stays for grids that have no true periods to be synchronous with.
     // Which renderer. At the source's own pitch the accumulator below *is* the
-    // exact inverse — the two clocks coincide, every bucket is read at the phase
-    // its rotation describes, and no cycle is ever spliced — so there is nothing
-    // for a resynthesis to improve and a measurable amount for it to lose (a
-    // steady tone: -60 dB against -52.7, and with vibrato -53.4 against -25.8,
-    // because PSOLA lays its grains on a smooth epoch grid of its own rather
-    // than on the recording's boundaries).
-    //
-    // Off that pitch the accumulator has no coherent answer at all and PSOLA
-    // does. The threshold is a cent, far below where either is audible, so the
-    // changeover cannot be heard.
+    // exact inverse — nothing spliced, nothing to improve, and a measurable
+    // amount to lose (steady tone -60 vs PSOLA's -52.7 dB; with vibrato -53.4 vs
+    // -25.8, since PSOLA lays grains on an epoch grid of its own). Off that
+    // pitch the accumulator has no coherent answer at all and PSOLA does. The
+    // threshold is a cent, far below audibility, so the changeover cannot be
+    // heard.
     let unity = timing
         .map(|t| {
             let p: f32 = t.periods.iter().sum();
@@ -376,15 +335,12 @@ fn render_key_buffer(
             p > 0.0 && (s / p - 1.0).abs() < 6e-4
         })
         .unwrap_or(false);
-    // `LESYNTH_NO_PSOLA=1` forces the accumulator for every key: the A/B that
-    // shows what the resynthesis is worth on a given source, and the way the
-    // numbers in `a_transposed_key_is_not_spliced_out_of_several_buckets` were
-    // set. Not a supported setting — a bisection tool.
+    // `LESYNTH_NO_PSOLA=1` forces the accumulator on every key — the A/B that
+    // shows what the resynthesis is worth. A bisection tool, not a setting.
     let forced_off = std::env::var_os("LESYNTH_NO_PSOLA").is_some();
-    // `LESYNTH_FORCE_PSOLA=1` runs the resynthesis at the source's own pitch
-    // too, where the accumulator normally wins. Nothing is transposed there, so
-    // the output should be the source back again — which makes it the probe for
-    // what the grain pipeline itself loses, with transposition out of the way.
+    // `LESYNTH_FORCE_PSOLA=1` runs the resynthesis at the source's own pitch too,
+    // where nothing is transposed and the output should be the source back again
+    // — the probe for what the grain pipeline loses on its own.
     let unity = unity && std::env::var_os("LESYNTH_FORCE_PSOLA").is_none();
     if let Some(t) = timing.filter(|_| !unity && !forced_off) {
         return render_psola(
@@ -406,11 +362,10 @@ fn render_key_buffer(
 
         // ── Which bucket, and how long is its cycle ──────────────────────────
         let next = match walk {
-            // Source-timed: the bucket is where we are *along the source*, and
-            // its cycle is its own period. The two advance separately — that is
-            // what lets a key hold the source's duration while playing another
-            // pitch — and at the source's own pitch they coincide exactly, which
-            // is what makes this render the exact inverse there.
+            // Source-timed: the bucket is where we are *along the source* and its
+            // cycle is its own period. Advancing separately is what lets a key
+            // hold the source's duration at another pitch; at the source's own
+            // pitch they coincide and this render is the exact inverse.
             Some(_) => Some((along as usize).min(num_buckets - 1)),
             None => {
                 let cycle = cycles as usize;
@@ -435,10 +390,9 @@ fn render_key_buffer(
                 Some(t) => t.periods[b].max(2.0),
                 None => bucket_period(base_period, ratios, b),
             };
-            // The bucket's own mean. Dropping it (as this renderer used to) puts
-            // a step at every bucket boundary — worth 41 dB of the exact
-            // inverse's fidelity on a measured tone, and a step at the bucket
-            // rate is heard as buzz, not as a level error.
+            // The bucket's own mean. Dropping it puts a step at every bucket
+            // boundary — 41 dB of the exact inverse's fidelity, and a step at the
+            // bucket rate is heard as buzz, not as a level error.
             dc = timing.and_then(|t| t.dc.get(b).copied()).unwrap_or(0.0);
             // The grid's harmonics have the bucket's wrap ramp taken out of
             // them, so it is added back below — see [`PlaybackGrid::ramp`].
@@ -476,31 +430,20 @@ fn render_key_buffer(
 }
 
 /// Synthesise a key by **pitch-synchronous overlap-add**: one grain per output
-/// period, each laid on the period boundary it came from, Hann-windowed two
-/// periods wide and overlapped at 50%.
+/// period, each read from a single bucket and laid on the boundary it came from.
 ///
-/// This replaces a phase accumulator that read whichever bucket the wall clock
-/// pointed at, sample by sample. That is only coherent while the renderer's
-/// phase advances at the source's own rate — its own pitch, on the wall clock —
-/// because each bucket's phases are pre-rotated by the phase the *source* had
-/// reached there. On any other key the two clocks separate and a single
-/// rendered cycle gets spliced out of several buckets (four of them, two
-/// octaves down), each read at a phase its rotation does not describe. The
-/// result had the right harmonic amplitudes and the wrong harmonic phases,
-/// once per cycle, right through the formants: measured 18 dB worse than a
-/// linear-interpolation resampler, and audible on every key but the source's
-/// own pitch.
+/// It replaces a phase accumulator that picked its bucket from the wall clock
+/// sample by sample. That is coherent only at the source's own pitch; on any
+/// other key the two clocks separate and one rendered cycle is spliced out of
+/// several buckets (four, two octaves down), each read at a phase its rotation
+/// does not describe — right amplitudes, wrong phases, once per cycle, through
+/// the formants. It measured 18 dB worse than a linear-interpolation resampler.
 ///
-/// A grain fixes it by being self-contained. It is one bucket's waveform read
-/// from *its* phase origin (hence [`PlaybackGrid::rotations`]), so no rotation
-/// has to survive a bucket change, and the change itself becomes a cross-fade
-/// over one period instead of a splice. Grain spacing is the key's period, so
-/// transposing up repeats grains and down skips them — which is what PSOLA
-/// does, and it stays coherent at any ratio.
-///
-/// Hann windows two periods wide at one period's hop sum to 1, but the period
-/// moves with the source's pitch, so the window sum is accumulated and divided
-/// out rather than assumed.
+/// A grain is self-contained: one bucket's waveform read from its own phase
+/// origin, so no rotation has to survive a bucket change. Spacing is the key's
+/// period, so transposing up repeats grains and down skips them, which stays
+/// coherent at any ratio. The window sum is accumulated and divided out rather
+/// than assumed, because the period moves with the source's pitch.
 ///
 /// `target_samples`: `> 0` walks the source's spans across that many samples
 /// ("preserve seconds"); `0` lays one grain per bucket, the Synth timeline.
@@ -543,31 +486,15 @@ fn render_psola(
 
     // How much of a period the grains cross-fade over. **None, by default.**
     //
-    // A cross-fade is for hiding a join, and there is no longer a join to hide.
-    // Consecutive grains are consecutive periods of the source — cut where they
-    // are played (`build_playback_grid` advances by the true period) and closed
-    // in value (`PlaybackGrid::ramp`) — so grain `b` ends on exactly the sample
-    // grain `b+1` starts on. What the fade does instead is average each period
-    // with its neighbour, and a voice's periods genuinely differ: that average
-    // is a loss, and it is the largest one left.
-    //
-    // Measured against the render this method is trying to produce (one true
-    // source period per output period, read straight off the exact inverse —
-    // `tools/psolaref.py` in gemstone-daw), on my_voice.m4a:
-    //
-    //                     preserve seconds   synth timeline
-    //     overlap 0.15        -37.6 dB           -37.8 dB
-    //     overlap 0.05        -48.4 dB           -49.8 dB
-    //     overlap 0           -64.2 dB           -64.1 dB
-    //
-    // and independently, against a true band-limited resampling of the same
-    // voice (`tools/resampcmp.py`, which knows nothing about grains): -36.9 dB
-    // at 0.15 against -42.8 at zero, with the 4-6 kHz residual falling from
-    // -8.8 dB relative to the band to -23.0.
-    //
-    // The earlier figure of 0.15 was measured before the cut was placed where it
-    // is played and before the loop was closed, when the joins really did not
-    // join and the fade was covering for them.
+    // A fade hides a join, and there is none left to hide: consecutive grains
+    // are consecutive periods, cut where they are played and closed in value
+    // (`PlaybackGrid::ramp`). All the fade does now is average each period with
+    // its neighbour, and a voice's periods genuinely differ — the largest error
+    // left. Against the render the method is trying to produce
+    // (gemstone-daw's `tools/psolaref.py`), on my_voice: -37.6 dB at 0.15,
+    // -48.4 at 0.05, -64.2 at zero; and against a true resampling, -36.9 vs
+    // -42.8, with the 4-6 kHz residual going -8.8 -> -23.0 dB. The old 0.15 was
+    // measured when the joins really did not join.
     const DEFAULT_OVERLAP: f64 = 0.0;
     let overlap: f64 = std::env::var("LESYNTH_OVERLAP")
         .ok()
@@ -591,10 +518,10 @@ fn render_psola(
         }
     };
 
-    // Where each bucket's waveform starts, relative to the first — the running
-    // sum of the wrap ramps, since `ramp[b]` is exactly `h(b+1)(0) - h(b)(0)`.
-    // A grain's own ramp is then the difference between where it starts and
-    // where the *next* grain starts, which is what makes a splice join.
+    // Where each bucket's waveform starts, relative to the first: the running sum
+    // of the wrap ramps, since `ramp[b]` is `h(b+1)(0) - h(b)(0)`. A grain's ramp
+    // is then the gap to wherever the *next* grain starts — what makes a splice
+    // join.
     let mut origin = Vec::with_capacity(nb + 1);
     let mut acc_ramp = 0.0f32;
     origin.push(0.0f32);
@@ -623,26 +550,15 @@ fn render_psola(
 
         let p = (timing.periods[b] as f64).max(2.0);
         let dc = timing.dc.get(b).copied().unwrap_or(0.0);
-        // The ramp bridges this grain's start value to the **next grain's**,
-        // which is the bucket after this one only while the key is playing the
-        // source's own periods in order.
-        //
-        // It is not, wherever the key's period made the renderer skip a bucket
-        // (transposing down) or repeat one (transposing up). Bridging to `b + 1`
-        // there leaves the grain ending on material the next grain does not
-        // begin with — a step of about one ramp, at a *splice*, and the only
-        // joins where a step can appear at all. Measured on my_voice at 65 Hz,
-        // where 65% of the joins are splices, against the same cubic-corner
-        // measure taken at samples that are not joins at all (`tools/joinstep.py`
-        // in gemstone-daw — the control matters, because at a high key a cubic
-        // through four samples reads large everywhere):
-        //
-        //     no join      rms 0.0094      continuation rms 0.0040
-        //     splice       rms 0.0383  ->  four times the control
-        //
-        // Bridging to the bucket actually played next makes every join
-        // continuous by construction: a repeat gets no ramp at all (the grain is
-        // a closed loop, which is exactly what repeating a period means) and a
+        // The ramp bridges this grain's start value to the **next grain's** —
+        // the bucket after this one only while the key plays the source's
+        // periods in order. Where the key's period made the renderer skip a
+        // bucket (down) or repeat one (up), bridging to `b + 1` leaves a step of
+        // about one ramp at that splice. On my_voice at 65 Hz, where 65% of the
+        // joins are splices, that step measured rms 0.038 against a 0.0094
+        // control (`tools/joinstep.py`) and is now 0.0046. Bridging to the
+        // bucket actually played next makes every join continuous: a repeat gets
+        // no ramp (a closed loop, which is what repeating a period means), a
         // skip gets the ramp across everything it skipped.
         let next_b = bucket_at(tau + p, epoch + 1).unwrap_or((b + 1).min(nb - 1));
         let ramp = origin[next_b.min(nb)] - origin[b];
@@ -658,11 +574,10 @@ fn render_psola(
                 continue;
             }
             let x = (idx as f64 - tau) / p;
-            // Half-open, deliberately: a sample landing exactly on an epoch
-            // belongs to the grain that starts there and not to the one that
-            // ends there. With `x <= -half` and no fade it belonged to neither,
-            // so its window sum stayed zero and it came out as a hole — every
-            // grain boundary, whenever the key's period is a whole number.
+            // Half-open, deliberately: a sample landing on an epoch belongs to
+            // the grain starting there, not the one ending. With `x <= -half` and
+            // no fade it belonged to neither and came out as a hole — every
+            // boundary, whenever the key's period is a whole number.
             if x < -half || x >= 1.0 + half {
                 continue;
             }
@@ -715,25 +630,18 @@ fn render_psola(
     out
 }
 
-/// How a key's render is laid out over the source it came from. Every field is
-/// per bucket and in *output* samples.
+/// How a key's render is laid out over the source. Every field is per bucket and
+/// in *output* samples. Two clocks, deliberately separate:
 ///
-/// Two clocks, deliberately separate:
+/// * `periods` is the **pitch** — the bucket's true period transposed onto the
+///   key. Not its recorded length: that is the period rounded to a whole sample,
+///   and a key that renders the rounding hears it as pitch.
+/// * `spans` is the **wall clock** — the source's own duration, the same on
+///   every key ("preserve seconds").
 ///
-/// * `periods` is the pitch — the bucket's **true** period ([`PlaybackGrid`]),
-///   transposed onto the key. Not its recorded length: that is the true period
-///   rounded to a whole sample, and a key that renders the rounding hears it as
-///   pitch.
-/// * `spans` is the clock — how long the bucket occupies, which is the source's
-///   own duration and therefore the same on every key ("preserve seconds").
-///
-/// At the source's own pitch the two run together (they differ only by each
-/// bucket's rounding, and not at all on average). Transposed, they separate by
-/// the transposition: the render walks the source at wall-clock speed while the
-/// waveform runs at the key's pitch. One running phase carries the whole note —
-/// the grid's buckets are rotated to share it, so no bucket change re-references
-/// it, and it is that re-referencing which used to drop the rounding of every
-/// bucket at the bucket rate and buzz where the Original Pitch audition did not.
+/// They coincide at the source's own pitch and separate by the transposition
+/// otherwise. One running phase carries the whole note, since the grid's buckets
+/// are rotated to share it.
 struct BucketTiming<'a> {
     periods: &'a [f32],
     spans: &'a [f32],
@@ -852,13 +760,11 @@ impl CycleCache {
 /// Scale the grid down so no bucket's harmonics can sum past 1.0 — the rendered
 /// sample is their worst-case in-phase sum and would clip.
 ///
-/// The factor is **global**, from the loudest bucket. Per-bucket is equally
+/// The factor is **global**, from the loudest bucket: per-bucket is equally
 /// clip-safe but acts as a compressor (0.57–1.00 across 354 of D5.wav's 473
-/// buckets), flattening the note's own dynamics. One function so the sync and
-/// background paths cannot normalise differently, as they once did.
-///
-/// **Returns the divisor** (1.0 if the grid already fit), so a caller
-/// reproducing the source at its own level can multiply it back in.
+/// buckets). One function, so the sync and background paths cannot normalise
+/// differently. **Returns the divisor** (1.0 if the grid already fit) so a
+/// caller reproducing the source's own level can multiply it back in.
 #[must_use]
 pub fn normalize_grid_per_bucket(grid: &mut [Vec<f32>]) -> f32 {
     let buckets = grid.first().map(|r| r.len()).unwrap_or(0);
@@ -885,25 +791,20 @@ pub fn normalize_grid_per_bucket(grid: &mut [Vec<f32>]) -> f32 {
 ///
 /// Bucket `b` is one period of `bucket_lengths[b]` samples whose harmonics are
 /// bins `1..N/2` of exactly those samples, so one inverse FFT per bucket returns
-/// them and the concatenation returns the subtrack. No interpolation, no
-/// cross-fade, no cycle table, no renormalisation: all of those exist to paper
-/// over resampling to a different period, and there is none to do here. Kept
-/// separate from [`render_key_buffer`], which transposes and therefore must.
+/// them and the concatenation returns the subtrack. No interpolation, cross-fade,
+/// cycle table or renormalisation — all of those exist to paper over resampling
+/// to a different period, and there is none here.
 ///
 /// * `dc` / `nyq` – the non-harmonic bins; empty slices omit them (close, not
-///   exact). The harmonic toggles below do not touch them: they are not
-///   harmonics and the toggle grid does not list them.
+///   exact). The toggles below do not list them, so they are never touched.
 /// * `ampl_enabled` / `phase_enabled` – the per-harmonic checkboxes, indexed by
-///   `harmonic - 1` like the grid rows. A disabled amplitude drops that partial;
-///   a disabled phase renders it at phase 0 — the same meaning they carry in
-///   [`render_key_buffer`], so the audition and the keys agree. An **empty**
-///   slice means "all enabled", for callers with no flags of their own (the host
-///   bridge, tests).
-/// * `display_gain` – divided back out, so the output is at the source's own
-///   level; `0` keeps the grid's display-normalised level.
-/// * `rate_ratio` – `output_rate / analysis_rate`; `1.0` is the exact case.
-///   Applied by [`resample_stream`] to the *finished* reconstruction — see
-///   there for why it cannot be folded into the per-bucket transform.
+///   `harmonic - 1`. Disabled amplitude drops the partial, disabled phase
+///   renders it at 0 — the same meaning as in [`render_key_buffer`], so the
+///   audition and the keys agree. **Empty** means "all enabled".
+/// * `display_gain` – divided back out for the source's own level; `0` keeps the
+///   grid's display-normalised one.
+/// * `rate_ratio` – `output_rate / analysis_rate`, applied by [`resample_stream`]
+///   to the *finished* reconstruction (see there for why not per bucket).
 pub fn resynthesize_exact(
     amplitude: &[Vec<f32>],
     phase: &[Vec<f32>],
@@ -967,25 +868,15 @@ pub fn resynthesize_exact(
 /// samples that period rounds to, and pre-rotated so every bucket shares one
 /// phase origin.
 ///
-/// Why it exists. A bucket is a whole number of samples and a period is not
-/// (150 samples for a true 149.83), so the bucket's bins are those of a window
-/// that does not close. That costs the exact inverse nothing — the same bins put
-/// those very samples back — but a key does not play the samples, it plays the
-/// bins *as a periodic waveform*, and a window that does not close spreads every
-/// harmonic across its neighbours. The spreading depends on where the rounding
-/// fell, so it differs from bucket to bucket, and what a key hears is that
-/// difference arriving at the bucket rate: a few hundred Hz of roughness, the
-/// buzz that the Original Pitch audition of the same grid does not have.
-/// Measured on a steady 12-harmonic tone whose period is 149.83 samples, against
-/// the exact transposition of it: **−27 dB** from the bucket's own bins, **−74
-/// dB** from a true period of the reconstruction. (A tone whose period happened
-/// to be a whole 400 samples measured −100 dB either way — the giveaway that the
-/// rounding, not the renderer, was the defect.)
-///
-/// So: reconstruct the source exactly (that reconstruction is what Original
-/// Pitch And Gain plays), cut one *fractional* period out of it per bucket, and
-/// transform that. Every bucket then holds a waveform that closes, and
-/// neighbouring buckets differ only by what the source actually did.
+/// A bucket is a whole number of samples and a period is not (150 for a true
+/// 149.83), so its bins are those of a window that does not close. The exact
+/// inverse does not care — the same bins put those samples back — but a key
+/// plays them *as a periodic waveform*, and an unclosed window spreads every
+/// harmonic by an amount that depends on where the rounding fell. A key hears
+/// that at the bucket rate: **−27 dB** from the bucket's own bins against
+/// **−74 dB** from a true period of the reconstruction (at a whole 400-sample
+/// period both measured −100, the giveaway). So: reconstruct exactly, cut one
+/// *fractional* period per bucket, transform that.
 pub struct PlaybackGrid {
     /// `[harmonic][bucket]`, normalised like the playback grid it replaces.
     pub amplitude: Vec<Vec<f32>>,
@@ -999,23 +890,17 @@ pub struct PlaybackGrid {
     /// bucket's last sample sits from its first, subtracted as a straight line
     /// before the transform and added back as one at render time.
     ///
-    /// A bucket is one period cut out of a real recording, and consecutive
-    /// periods of a voice are not identical — the cut therefore does not close,
-    /// and its *periodic* extension steps by this much at every wrap. A harmonic
-    /// series is a periodic basis, so it can only answer that step with Gibbs
-    /// ringing, and the ringing lands exactly on the grain boundary: one
-    /// impulse, one to two samples wide, of random sign, **once per rendered
-    /// period** — a buzz, and the one the exact inverse never shows because it
-    /// only ever samples each bucket at the integer points where the ringing is
-    /// not evaluated.
+    /// Consecutive periods of a voice differ, so the cut does not close and its
+    /// *periodic* extension steps at every wrap. A harmonic series can only
+    /// answer a step with Gibbs ringing, which lands on the grain boundary: one
+    /// impulse, 1-2 samples wide, random sign, **once per rendered period**. The
+    /// exact inverse never shows it, sampling only the integer points where the
+    /// ringing is not evaluated.
     ///
-    /// Taking the straight line out first makes the stored waveform genuinely
-    /// periodic; putting it back as a line reproduces the material exactly and
-    /// costs no ringing at all. It also makes consecutive grains join in value
-    /// by construction, since bucket `b`'s line ends where bucket `b+1`'s
-    /// material starts. Measured against a true resampling of the same voice at
-    /// 110 Hz: the per-period impulse falls from 0.0086 to 0.0013 and the
-    /// 4-6 kHz residual from −4.9 to −23.5 dB relative to the band.
+    /// Taking the line out makes the stored waveform genuinely periodic and
+    /// putting it back reproduces the material exactly, so consecutive grains
+    /// join by construction. At 110 Hz the per-period impulse fell 0.0086 ->
+    /// 0.0013 and the 4-6 kHz residual −4.9 -> −23.5 dB relative to the band.
     pub ramp: Vec<f32>,
     /// The true period, in source samples — what one cycle of a bucket is.
     pub periods: Vec<f32>,
@@ -1039,10 +924,9 @@ pub struct PlaybackGrid {
     /// zero — the period boundary. PSOLA needs exactly that, to lay each grain
     /// on the boundary it came from.
     pub rotations: Vec<f32>,
-    /// What [`normalize_grid_per_bucket`] divided this grid by while building
-    /// it. A key plays the normalised grid and does not care, but a caller
-    /// reproducing the source's own level has to multiply it back in, and it is
-    /// not the analysis grid's divisor — the two grids differ.
+    /// What [`normalize_grid_per_bucket`] divided this grid by. A key does not
+    /// care, but a caller reproducing the source's level must multiply it back in
+    /// — and it is not the analysis grid's divisor; the two grids differ.
     pub norm_divisor: f32,
 }
 
@@ -1085,11 +969,10 @@ pub fn build_playback_grid(
     if nb == 0 || num_harmonics == 0 || amplitude[0].len() != nb || lengths.iter().any(|&l| l < 2) {
         return None;
     }
-    // The exact inverse, on the grid's own scale and at the analysis rate: no
-    // display gain to undo and no rate to convert, because nothing here leaves
-    // the source's own timebase. Toggles are deliberately not applied — they are
-    // a per-key render-time edit, and applying them twice would zero a phase
-    // that this transform has already folded into a waveform.
+    // The exact inverse on the grid's own scale and rate: nothing here leaves the
+    // source's timebase. Toggles are deliberately not applied — a per-key
+    // render-time edit, and applying them twice would zero a phase this transform
+    // has already folded into a waveform.
     let source = resynthesize_exact(amplitude, phase, lengths, dc, nyq, &[], &[], 0.0, 1.0);
     if source.is_empty() {
         return None;
@@ -1157,39 +1040,29 @@ pub fn build_playback_grid(
             // 2π, so there is nothing to subtract.
             out_phase[k - 1][b] = ph;
         }
-        // Advance by the **true** period, not by the recorded length.
-        //
-        // The two differ by the rounding the length carries, and the renderer
-        // places its grains a true period apart. Cutting them a recorded length
-        // apart therefore hands each grain material from a slightly different
-        // place than where it is played, by an amount that walks through the
-        // note — so consecutive grains no longer join, and every join is a step.
-        // Steps at the period rate are broadband: the 4-6 kHz band, where this
-        // voice is 36 dB down, came out *above* the source and got worse toward
-        // the end of the note, which is where the walk is largest.
-        //
-        // Advancing by `t` makes the cut and the placement the same thing.
-        // Consecutive grains are then consecutive periods of the source, they
-        // join exactly, and each bucket begins a whole cycle after the last —
-        // so the phase origin below is an integer and the rotation vanishes.
+        // Advance by the **true** period, not the recorded length. The renderer
+        // places grains a true period apart, so cutting them a rounded length
+        // apart hands each one material from a slightly different place than
+        // where it is played, by an amount that walks through the note — every
+        // join becomes a step, and steps at the period rate are broadband (4-6
+        // kHz came out *above* the source, worst at the end). Advancing by `t`
+        // makes the cut and the placement the same thing, so each bucket begins
+        // a whole cycle after the last and the rotation vanishes.
         rotations[b] = 0.0;
         start += t;
     }
 
-    // Where the source's own spectrum ends. A recording rolls off smoothly or
-    // falls off a cliff (a codec's lowpass); either way the last harmonic that
-    // carries signal is the last one whose mean rises above a floor far below
-    // the loudest. 60 dB is deep enough to keep a natural rolloff and shallow
-    // enough to catch a cliff.
+    // Where the source's own spectrum ends: the last harmonic whose mean rises
+    // above a floor far below the loudest. 60 dB is deep enough to keep a natural
+    // rolloff and shallow enough to catch a codec's cliff.
     let mut mean = vec![0.0f32; num_harmonics];
     for (n, m) in mean.iter_mut().enumerate() {
         *m = out_amp[n].iter().copied().sum::<f32>() / nb as f32;
     }
     let floor = mean.iter().copied().fold(0.0f32, f32::max) * 1e-3;
-    // Keep a few harmonics past the edge. A real top harmonic leaks into its
-    // neighbours, and cutting flush loses part of it — worth 10 dB against an
-    // analytic ideal on a 12-harmonic tone. The noise band this exists to
-    // remove is tens of harmonics wide, so a small margin costs nothing there.
+    // Keep a few harmonics past the edge: a real top harmonic leaks into its
+    // neighbours and cutting flush loses part of it (10 dB against an analytic
+    // ideal). The noise band this removes is tens of harmonics wide anyway.
     const BANDWIDTH_MARGIN: usize = 4;
     let usable_harmonics = mean
         .iter()
@@ -1270,14 +1143,11 @@ fn resample_kernel() -> Vec<f64> {
         .collect()
 }
 
-/// Read `input` between its samples at `pos`, band-limited — the same kernel
-/// [`resample_stream`] uses, at one point instead of a stream, and at full
-/// bandwidth (the sample grid moves, the content does not).
-///
-/// Used to cut a bucket's true period out of the reconstruction, where a cubic
-/// read is not good enough: a period of real material carries content up to its
-/// own Nyquist, and Catmull-Rom's error there is broadband — it measured 12 dB
-/// worse on a key transposed 19 semitones up.
+/// Read `input` between its samples at `pos`, band-limited — [`resample_stream`]'s
+/// kernel at one point, at full bandwidth (the sample grid moves, the content
+/// does not). Used to cut a bucket's true period out of the reconstruction,
+/// where a cubic read is not enough: the material runs to its own Nyquist and
+/// Catmull-Rom's error there is broadband, 12 dB worse 19 semitones up.
 fn sinc_read(input: &[f32], table: &[f64], pos: f64) -> f32 {
     let half = RESAMPLE_TAPS as f64;
     let first = (pos - half).ceil().max(0.0) as usize;
@@ -1303,12 +1173,10 @@ fn sinc_read(input: &[f32], table: &[f64], pos: f64) -> f32 {
 ///
 /// **Applied to the whole reconstruction, never per bucket.** Rendering a
 /// bucket's spectrum into `m` points instead of `n` looks like a free
-/// band-limited resample, and is what this replaced. It assumes the period
-/// repeats: a quasi-periodic bucket's ends do not join up, so any length but
-/// its own evaluates between the samples where that step lives and rings
-/// against it — **once per period**, −27.7 dB peak / −50 dB rms on a steady
-/// 12-harmonic tone at 22.05 → 44.1 kHz. Rounding each bucket's output length
-/// separately also jittered the time base by up to half a sample per period.
+/// band-limited resample but assumes the period repeats; a quasi-periodic
+/// bucket's ends do not join, so any other length rings against that step once
+/// per period (−27.7 dB peak / −50 rms at 22.05 → 44.1 kHz). Per-bucket rounding
+/// also jittered the time base by up to half a sample per period.
 pub fn resample_stream(input: &[f32], ratio: f64) -> Vec<f32> {
     if input.is_empty() || !ratio.is_finite() || ratio <= 0.0 {
         return input.to_vec();
@@ -1351,17 +1219,13 @@ pub fn resample_stream(input: &[f32], ratio: f64) -> Vec<f32> {
     out
 }
 
-/// Render a grid the way playback does, with no live engine: normalisation then
-/// [`render_key_buffer`], every harmonic enabled. The host bridge
-/// (`lesynth_fourier_resynthesize`) goes through here, so a host-side test
-/// measures the real playback path rather than a copy of it.
+/// Render a grid the way playback does, with no live engine. The host bridge
+/// goes through here, so a host-side test measures the real path.
 ///
-/// * `base_period`    – **fractional** period in samples; pass
-///   `sample_rate / base_freq` unrounded.
-/// * `max_harmonic`   – anti-alias cap; `0` = only the `period / 2` limit.
-/// * `target_samples` – `0` = one cycle per bucket, `> 0` = "preserve seconds".
-/// * `display_gain`   – non-zero divides it back out, giving the source's own
-///   absolute level; `0` keeps the grid's display-normalised level.
+/// `base_period` is the **fractional** period in samples; `max_harmonic` an
+/// anti-alias cap (`0` = the `period/2` limit only); `target_samples` `0` for one
+/// cycle per bucket, `> 0` for "preserve seconds"; `display_gain` non-zero
+/// divides that gain back out for the source's own level.
 pub fn resynthesize_grid(
     amplitude: &[Vec<f32>],
     phase: &[Vec<f32>],
@@ -1405,22 +1269,16 @@ pub fn resynthesize_grid(
 /// source's own two clocks — with no live engine, so an offline tool measures
 /// the path a listener actually hears.
 ///
-/// [`resynthesize_grid`] cannot do this: the host bridge it serves passes a
-/// pitch contour and no bucket lengths, so it renders on a uniform time grid
-/// from the analysis grid's rounded buckets. That is a different signal from
-/// what a key plays, and measuring it is how a keyboard defect stays invisible
-/// to an offline dump.
+/// [`resynthesize_grid`] cannot: it renders the analysis grid's *rounded*
+/// buckets on a uniform time grid, a different signal from what a key plays —
+/// which is how a keyboard defect stays invisible to an offline dump.
 ///
-/// * `lengths`/`dc`/`nyq` – the analysis's own, exactly as
-///   [`resynthesize_exact`] takes them (source samples).
-/// * `analysis_rate`/`out_rate` – to place the source's spans on the output
-///   clock; equal rates keep them as they are.
-/// * `base_period` – the key's period in **output** samples, fractional.
-/// * `base_freq` – the analysis fundamental, to scale each bucket's true period
-///   onto the key.
-///
-/// Falls back to [`resynthesize_grid`] when the grid carries no usable lengths,
-/// which is exactly when a key does too.
+/// `lengths`/`dc`/`nyq` are the analysis's own (source samples);
+/// `analysis_rate`/`out_rate` place its spans on the output clock;
+/// `base_period` is the key's period in **output** samples, fractional; and
+/// `base_freq` scales each bucket's true period onto the key. Falls back to
+/// [`resynthesize_grid`] when there are no usable lengths — exactly when a key
+/// does too.
 #[allow(clippy::too_many_arguments)]
 pub fn resynthesize_key(
     amplitude: &[Vec<f32>],
@@ -1504,15 +1362,12 @@ pub fn resynthesize_key(
     sound
 }
 
-/// Factor that returns a render of the stored grid to the source's own absolute
-/// level, or `None` when that level isn't known (`display_gain <= 0`: a
-/// hand-drawn grid, or a `.lsft` from before the gain was recorded).
-///
-/// Two deliberate level changes sit between the analysed amplitudes and the
-/// audio and both are undone here: `display_gain` (chart legibility, ×15.4 on
-/// the quiet D5 sample) and `divisor` (clip safety). Their product is not 1.0 —
-/// together they played the D5 resynthesis 18.9 dB hot, which reads as a harsh,
-/// noisy version of the source rather than a faithful one.
+/// Factor returning a render of the stored grid to the source's own absolute
+/// level, or `None` when that level is unknown (`display_gain <= 0`: hand-drawn,
+/// or a pre-v2 `.lsft`). Two deliberate level changes sit between the analysed
+/// amplitudes and the audio and both are undone here: `display_gain` (chart
+/// legibility, ×15.4 on the quiet D5) and `divisor` (clip safety). Left in, they
+/// played the D5 resynthesis 18.9 dB hot.
 pub fn source_level_scale(display_gain: f32, divisor: f32) -> Option<f32> {
     if display_gain <= 0.0 || divisor <= 0.0 {
         return None;
@@ -1538,21 +1393,16 @@ fn target_samples_for(shared_params: &SharedParams) -> usize {
     }
 }
 
-// Deliberately not `Clone`: the engine is always used behind an `Arc` (the
-// registry holds `Weak`s to it), and a value-copy would duplicate the analysis
-// mailbox and editor registration while the background compute thread kept
-// serving only the original.
+// Deliberately not `Clone`: the engine lives behind an `Arc` (the registry holds
+// `Weak`s), and a value-copy would duplicate the analysis mailbox and editor
+// registration while the compute thread kept serving only the original.
 pub struct SynthComputeEngine {
     synth_params: Arc<LeSynthParams>,
     pub shared_params: Arc<SharedParams>,
-    /// Analysis job the host pushed *for this instance*, waiting to be claimed
-    /// by this instance's editor. A single slot rather than a queue: the host
-    /// pushes at most one subtrack per instance, and a second push supersedes an
-    /// unclaimed first.
-    ///
-    /// Per-instance because several editors can be open at once — a shared inbox
-    /// lets whichever editor happens to paint first swallow another instance's
-    /// job, leaving that instance with empty charts.
+    /// Analysis job the host pushed *for this instance*, waiting for its editor.
+    /// One slot, not a queue: a second push supersedes an unclaimed first.
+    /// Per-instance because with several editors open a shared inbox lets
+    /// whichever paints first swallow another instance's job.
     pending_analysis: Mutex<Option<crate::AnalysisJob>>,
     /// This instance's editor egui context, registered while its editor is open
     /// so off-thread events (host pushes, MIDI) can wake *this* idle editor.
@@ -1605,16 +1455,11 @@ impl SynthComputeEngine {
         self.pending_analysis.lock().ok().and_then(|mut g| g.take())
     }
 
-    /// Whether harmonic `n`'s hand-drawn Synth-mode curve is allowed to
-    /// overwrite its live grid row for `chart_type`.
-    ///
-    /// In plain Synth mode (no analysed audio loaded) the drawn curve always
-    /// owns the row — the per-harmonic "cust" override is implicitly on. Once an
-    /// analysis is loaded, the row belongs to the data extracted from the source
-    /// sound, and a drawn curve must replace it only when the user has ticked
-    /// "cust" for that harmonic. Without this gate, drawing in Synth mode would
-    /// silently clobber a loaded sound's analysed row even though "cust" was
-    /// never selected.
+    /// Whether harmonic `n`'s hand-drawn Synth curve may overwrite its live grid
+    /// row. In plain Synth mode the drawn curve always owns the row; once an
+    /// analysis is loaded the row belongs to the source and a curve replaces it
+    /// only where "cust" is ticked. Without the gate, drawing would silently
+    /// clobber an analysed row nobody asked to override.
     fn curve_overrides_live(&self, n: usize, chart_type: ChartType) -> bool {
         let has_analysis = *self.shared_params.analysis_duration_secs.lock().unwrap() > 0.0;
         if !has_analysis {
@@ -1831,31 +1676,22 @@ impl SynthComputeEngine {
             .unwrap_or(0)
     }
 
-    /// Resize the per-bucket synthesis grid to `new_buckets`, resampling every
-    /// harmonic's *existing* amp/phase envelope onto the new grid. This is the
-    /// time-resolution of the synthesised envelope; only meaningful in Synth
-    /// mode. Analysis mode derives its bucket count from the analysed audio, so
-    /// callers must not invoke this while analysed data is loaded. No-op when the
-    /// grid is already that size.
+    /// Resize the per-bucket synthesis grid, resampling every harmonic's
+    /// *existing* envelope onto it. Synth mode only — Analysis derives its bucket
+    /// count from the audio. No-op if the grid is already that size.
     ///
-    /// The rows are resampled (not regenerated from each harmonic's params) on
-    /// purpose: harmonics the user never shaped still carry non-zero param
-    /// defaults, so regenerating would resurrect them as an audible buzz on every
-    /// resize. Resampling preserves exactly what is currently on the grid — an
-    /// all-zero (untouched) row stays silent, and drawn curves keep their shape.
+    /// Rows are resampled, not regenerated from each harmonic's params:
+    /// harmonics the user never shaped still carry non-zero defaults, so
+    /// regenerating would resurrect them as an audible buzz on every resize.
     pub fn set_num_buckets(&self, new_buckets: usize) {
         let new_buckets = new_buckets.max(1);
-        // An analysed grid's width is not a free parameter: it is one bucket per
-        // period of the source, and the analysis's own bucket lengths, DC and
-        // Nyquist rows are indexed by it. Resampling the rows alone leaves those
-        // describing a grid that no longer exists, and `build_playback_grid`
-        // answers a width mismatch with `None` — so every key would fall back to
-        // the contour renderer, silently, and start buzzing again.
-        //
-        // The editor already disables the control while input sound is loaded
-        // ("Locked: bucket count follows the loaded input sound"). This is the
-        // same rule where the invariant actually lives, so no other caller can
-        // break it either.
+        // An analysed grid's width is not a free parameter: the bucket lengths,
+        // DC and Nyquist rows are indexed by it. Resampling the rows alone leaves
+        // those describing a grid that no longer exists, and
+        // `build_playback_grid` answers a width mismatch with `None` — every key
+        // silently back on the contour renderer, buzzing again. The editor
+        // disables the control too; this is the same rule where the invariant
+        // lives, so no other caller can break it.
         if !self.shared_params.analysis_bucket_lengths.lock().unwrap().is_empty() {
             log::debug!(
                 "set_num_buckets({new_buckets}) ignored: the grid width follows the \
@@ -2440,16 +2276,13 @@ impl SynthComputeEngine {
 
         {
             // What the exact inverse needs beyond the grid: per-bucket lengths
-            // that tile the subtrack, plus the two non-harmonic bins.
-            //
-            // The condition is *only* the lengths. It used to also demand
-            // `periods_per_bucket == 1` and `!truncated`, and both refusals sent
-            // the audition to the transposing renderer — the very fuzz the
-            // inverse removes. Grouped buckets still invert exactly
-            // (`grouped_buckets_are_still_invertible`), and a truncated grid has
-            // lost those bins for the renderer too: measured −15.7 dB inverted
-            // against +3.3 dB rendered
-            // (`a_truncated_grid_still_inverts_better_than_it_renders`).
+            // that tile the subtrack, plus the two non-harmonic bins. The
+            // condition is *only* the lengths — demanding
+            // `periods_per_bucket == 1` and `!truncated` too sent the audition
+            // to the transposing renderer, the very fuzz the inverse removes.
+            // Grouped buckets still invert exactly, and a truncated grid has
+            // lost those bins for the renderer too (−15.7 dB inverted against
+            // +3.3 rendered).
             let exact = result.bucket_periods.len() == buckets
                 && result.bucket_periods.iter().all(|&p| p >= 2.0);
             *self.shared_params.analysis_bucket_lengths.lock().unwrap() = if exact {
@@ -2570,21 +2403,15 @@ impl SynthComputeEngine {
         self.load_analysis(&result);
     }
 
-    /// Load a precomputed harmonic grid directly (from a saved LeSynth track),
-    /// bypassing DFT analysis. Mirrors the tail of [`analyze_and_load`]: records
-    /// the source duration and fundamental, switches to Analysis mode, and hands
-    /// the grid to [`load_analysis`]. `amplitude`/`phase` are `[harmonic][bucket]`;
-    /// `pitch_ratio` is one entry per bucket (`f_local / base_freq`).
+    /// Load a precomputed grid (from a saved track), bypassing DFT analysis —
+    /// the tail of [`analyze_and_load`]. `amplitude`/`phase` are
+    /// `[harmonic][bucket]`, `pitch_ratio` one entry per bucket.
     ///
-    /// The instance's playback sample rate is left untouched (it must stay at the
-    /// host device rate), so a note still lasts `duration_secs` of wall-clock time
-    /// regardless of the rate the grid was captured at.
-    ///
-    /// `display_gain` is the [`normalize_for_display`](super::normalize_for_display)
-    /// gain the grid was captured with (`.lsft` carries it from version 2 on).
-    /// `0.0` means the saved file didn't record it, and the Original Pitch And
-    /// Gain audition then falls back to playing at the grid's own level rather than
-    /// inventing a source level it cannot know.
+    /// The playback rate is left at the host device's, so a note still lasts
+    /// `duration_secs` whatever rate the grid was captured at. `display_gain` is
+    /// the display normalisation the grid was saved with; `0.0` (not recorded)
+    /// leaves the audition at the grid's own level rather than inventing a
+    /// source level it cannot know.
     pub fn load_grid(
         &self,
         amplitude: Vec<Vec<f32>>,
@@ -3258,16 +3085,12 @@ mod tests {
         }
     }
 
-    /// The host bridge must render exactly what playback renders — a regression
-    /// test built on it is worthless if the two can drift apart.
-    ///
-    /// The bridge is handed a grid and a contour and nothing else, so this is
-    /// the case where playback has nothing more either: a grid with no recorded
-    /// bucket lengths, which is what a hand-drawn grid and any pre-v3 `.lsft`
-    /// are. **An analysed grid renders differently on a key** — it follows the
-    /// source's own bucket periods ([`source_timing`]), which the bridge's
-    /// arguments cannot express; carrying them across the ABI is what it would
-    /// take to compare the two on analysed material.
+    /// The host bridge must render exactly what playback renders, or a
+    /// regression test built on it is worthless. The bridge gets a grid and a
+    /// contour and nothing else, so this is the case where playback has nothing
+    /// more either: no recorded bucket lengths (a hand-drawn grid, a pre-v3
+    /// `.lsft`). An *analysed* grid renders differently on a key — it follows
+    /// the source's own periods, which the bridge's arguments cannot express.
     #[test]
     fn resynthesize_grid_matches_the_playback_path() {
         let engine = create_test_engine();
@@ -3386,13 +3209,10 @@ mod tests {
 
     /// The requirement in one assertion: what the plugin emits for Original
     /// Pitch And Gain **is** the file it analysed, every sample — not
-    /// "correlates with", not "at the same level".
-    ///
-    /// Two defects hid behind the exact-inverse tests, which measured the
-    /// transform rather than the button: the buffer was clamped to ±1 before the
-    /// mixer's `VOICE_MIX_SCALING` was reapplied (flat-topping anything above
-    /// 0.8 — hence the deliberately loud source here), and the rate change was
-    /// done per bucket (see [`resample_stream`]).
+    /// "correlates with", not "at the same level". Two defects hid behind the
+    /// exact-inverse tests, which measured the transform rather than the button:
+    /// the buffer was clamped to ±1 before `VOICE_MIX_SCALING` was reapplied
+    /// (hence the deliberately loud source), and the rate change was per bucket.
     #[test]
     fn original_pitch_audition_reproduces_the_source_sample_for_sample() {
         let engine = create_test_engine();
@@ -3839,13 +3659,11 @@ mod keyboard_fidelity {
     /// like the source, not like a rough copy of it — what "Original Pitch And
     /// Gain" plays, on a key.
     ///
-    /// It is the same grid either way, so any gap is the renderer's. Before the
-    /// source's own bucket periods drove it, this measured −32 dB on a steady
-    /// tone and −12 dB with vibrato against a −134 dB audition: the bucket
-    /// lengths were rounded to whole samples and then re-imposed as a pitch,
-    /// which lands that rounding as a phase jump at the cycle rate. Both figures
-    /// are now past −45 dB, and the bound below is set with room for the cycle
-    /// table's own error rather than at the measured value.
+    /// Same grid either way, so any gap is the renderer's. Before the source's
+    /// own periods drove it: −32 dB steady, −12 with vibrato, against a −134 dB
+    /// audition — the rounded bucket lengths re-imposed as a pitch land as a
+    /// phase jump at the cycle rate. Both are now past −45 dB; the bound below
+    /// leaves room for the cycle table's own error.
     #[test]
     fn a_key_at_the_sources_own_pitch_reproduces_the_source() {
         let sr = 44100.0;
@@ -4052,13 +3870,11 @@ mod keyboard_fidelity {
 
     /// A key press must never play audio rendered from a **different grid**.
     ///
-    /// `get_buffer_for_key` hands back the previous buffer whenever the key is
-    /// `Dirty` or `Computing`, to keep the audio thread from rendering. But
-    /// loading a source marks every key dirty while its old buffer — rendered
-    /// from whatever the grid was before, at startup the default Synth patch —
-    /// is still sitting there. So the first press after loading plays that,
-    /// which is neither the analysed sound nor anything the renderer is
-    /// responsible for, and no offline dump can see it.
+    /// `get_buffer_for_key` hands back the previous buffer while a key is
+    /// `Dirty`/`Computing`, to keep the audio thread from rendering. Loading a
+    /// source marks every key dirty with its old buffer still there — at startup
+    /// the default Synth patch — so the first press plays that. No offline dump
+    /// can see it.
     #[test]
     fn a_key_press_never_plays_a_buffer_from_the_previous_grid() {
         let sr = 24_000.0f32;
@@ -4103,11 +3919,9 @@ mod keyboard_fidelity {
     /// Changing the bucket count must not silently send every key back to the
     /// contour renderer.
     ///
-    /// `set_num_buckets` resamples the grid rows but leaves the analysis's
-    /// bucket lengths at their old count, and `build_playback_grid` refuses a
-    /// grid whose width disagrees with them. The refusal is silent — same call,
-    /// same signature — so the keyboard just starts buzzing again and nothing
-    /// in the offline dump or the other tests can see it.
+    /// `set_num_buckets` resamples the rows but left the analysis's bucket
+    /// lengths at their old count, and `build_playback_grid` refuses a width
+    /// mismatch — silently, so the keyboard just starts buzzing again.
     #[test]
     fn changing_the_bucket_count_keeps_the_playback_grid() {
         let sr = 24_000.0f32;
@@ -4184,12 +3998,10 @@ mod keyboard_fidelity {
     /// analysis — which is the normal case in a host and the one every other
     /// test here misses, because `analysed()` leaves the two equal.
     ///
-    /// A key's period comes from `piano_periods`, which is in device samples,
-    /// while the bucket's true period and span are in the source's. If the
-    /// conversion between them is wrong the note is still the right pitch and
-    /// the right length — `key_timing` scales both — so nothing obvious breaks;
-    /// what changes is how each bucket's cycle lands, which is heard as
-    /// roughness at the bucket rate and nowhere else.
+    /// A key's period is in device samples, the bucket's period and span in the
+    /// source's. Get the conversion wrong and the note is still the right pitch
+    /// and length (`key_timing` scales both) — only how each bucket's cycle lands
+    /// changes, heard as roughness at the bucket rate and nowhere else.
     #[test]
     fn a_key_reproduces_the_source_at_a_device_rate_too() {
         let analysis_sr = 24_000.0f32;
@@ -4389,12 +4201,11 @@ mod keyboard_fidelity {
 
     /// How far a render is from *the* correct transposition of [`steady`], in dB.
     ///
-    /// The source is a fixed harmonic series, so its transposition onto a key is
-    /// known in closed form: the same series at the key's frequency, with the
-    /// same relative phases, at whatever absolute phase and level the renderer
-    /// happens to start at. Both of those are fitted out, and what is left is
-    /// error — the metric a key's fuzz has to be judged by, since a lag-based
-    /// one cannot tell a rendered period apart from the period it assumed.
+    /// The source is a fixed harmonic series, so its transposition is known in
+    /// closed form: the same series at the key's frequency and relative phases,
+    /// at whatever absolute phase and level the renderer starts at. Both are
+    /// fitted out and the rest is error — a lag-based metric cannot tell a
+    /// rendered period from the period it assumed.
     fn vs_ideal_db(x: &[f32], sr: f32, f_key: f32) -> f64 {
         let n = x.len();
         let ideal = |psi: f64| -> Vec<f64> {
@@ -4508,26 +4319,17 @@ mod keyboard_fidelity {
     /// samples — which is nearly every source — must transpose onto a key
     /// without the roughness the rounding used to cost.
     ///
-    /// The source here is a steady 12-harmonic tone of 149.83 samples, so the
-    /// correct render at any key is a perfectly periodic waveform and every
-    /// departure from one is the renderer's. Measured against that ideal, and
-    /// against itself one period earlier:
+    /// The source is a steady 12-harmonic tone of 149.83 samples, so the correct
+    /// render at any key is perfectly periodic and every departure is the
+    /// renderer's. Against that ideal, and against itself one period earlier:
+    /// 5 semitones down −32.8/−29.5 -> **−62.1/−73.7 dB**, 7 up −27.1/−28.1 ->
+    /// **−56.5/−74.6**, 19 up −21.3/−27.1 -> **−44.3/−72.4**. The same tone with
+    /// a whole 400-sample period, which never had the defect, is held to its own
+    /// figure so a fix cannot regress the easy case.
     ///
-    /// | key | before | after |
-    /// |---|---|---|
-    /// | 5 semitones down | −32.8 / −29.5 dB | **−62.1 / −73.7 dB** |
-    /// | 7 up | −27.1 / −28.1 | **−56.5 / −74.6** |
-    /// | 19 up | −21.3 / −27.1 | **−44.3 / −72.4** |
-    ///
-    /// The bounds below sit well inside those, and the same tone with a period
-    /// of a whole 400 samples — which never had the defect — is held to the
-    /// figure it always measured, so a fix that only helps the awkward case
-    /// cannot regress the easy one.
-    ///
-    /// (What remains at 19 semitones up is a **0.03-cent** tuning offset, not
-    /// roughness: correcting for it takes the same render to −75 dB. It comes
-    /// from reading the true period off the bucket lengths, whose total rounds
-    /// once — see [`true_periods`].)
+    /// What remains 19 up is a **0.03-cent** tuning offset, not roughness
+    /// (correcting for it reaches −75 dB): the true period is read off the bucket
+    /// lengths, whose total rounds once — see [`true_periods`].
     #[test]
     fn a_transposed_key_does_not_inherit_the_bucket_rounding() {
         let sr = 44_000.0; // keys 36/48/60 land on 200/100/50-sample periods
