@@ -542,19 +542,34 @@ fn render_psola(
     let mut out = vec![0.0f32; n_out];
     let mut wsum = vec![0.0f32; n_out];
 
-    // How much of a period the grains cross-fade over.
+    // How much of a period the grains cross-fade over. **None, by default.**
     //
-    // The textbook figure is a whole period — two-period Hann grains at 50%
-    // overlap — which assumes the signal is locally stationary, so that
-    // averaging a period with its neighbour costs nothing. A voice is not: every
-    // period genuinely differs from the last, and that averaging is a loss.
-    // Measured at the source's own pitch, against the exact inverse, with
-    // nothing transposed: a full period of cross-fade gives -24.5 dB, a tenth of
-    // one -26.1. Transposed to 110 Hz the high band's modulation depth falls
-    // from 0.804 to 0.747, against 0.753 for a true resampling of the same
-    // material. Enough overlap to hide the join, not enough to average the
-    // material away.
-    const DEFAULT_OVERLAP: f64 = 0.15;
+    // A cross-fade is for hiding a join, and there is no longer a join to hide.
+    // Consecutive grains are consecutive periods of the source — cut where they
+    // are played (`build_playback_grid` advances by the true period) and closed
+    // in value (`PlaybackGrid::ramp`) — so grain `b` ends on exactly the sample
+    // grain `b+1` starts on. What the fade does instead is average each period
+    // with its neighbour, and a voice's periods genuinely differ: that average
+    // is a loss, and it is the largest one left.
+    //
+    // Measured against the render this method is trying to produce (one true
+    // source period per output period, read straight off the exact inverse —
+    // `tools/psolaref.py` in gemstone-daw), on my_voice.m4a:
+    //
+    //                     preserve seconds   synth timeline
+    //     overlap 0.15        -37.6 dB           -37.8 dB
+    //     overlap 0.05        -48.4 dB           -49.8 dB
+    //     overlap 0           -64.2 dB           -64.1 dB
+    //
+    // and independently, against a true band-limited resampling of the same
+    // voice (`tools/resampcmp.py`, which knows nothing about grains): -36.9 dB
+    // at 0.15 against -42.8 at zero, with the 4-6 kHz residual falling from
+    // -8.8 dB relative to the band to -23.0.
+    //
+    // The earlier figure of 0.15 was measured before the cut was placed where it
+    // is played and before the loop was closed, when the joins really did not
+    // join and the fade was covering for them.
+    const DEFAULT_OVERLAP: f64 = 0.0;
     let overlap: f64 = std::env::var("LESYNTH_OVERLAP")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -607,7 +622,12 @@ fn render_psola(
                 continue;
             }
             let x = (idx as f64 - tau) / p;
-            if x <= -half || x >= 1.0 + half {
+            // Half-open, deliberately: a sample landing exactly on an epoch
+            // belongs to the grain that starts there and not to the one that
+            // ends there. With `x <= -half` and no fade it belonged to neither,
+            // so its window sum stayed zero and it came out as a hole — every
+            // grain boundary, whenever the key's period is a whole number.
+            if x < -half || x >= 1.0 + half {
                 continue;
             }
             // Tukey: raised-cosine ramps of width `overlap`, flat between them.
@@ -1048,7 +1068,6 @@ pub fn build_playback_grid(
     let mut out_ramp = vec![0.0f32; nb];
 
     let mut start = 0.0f64; // where this bucket begins in the source
-    let mut rot = 0.0f64; // cycles the fundamental has run by then
     let mut rotations = vec![0.0f32; nb];
     for b in 0..nb {
         let t = periods[b] as f64;
@@ -1118,7 +1137,6 @@ pub fn build_playback_grid(
         // join exactly, and each bucket begins a whole cycle after the last —
         // so the phase origin below is an integer and the rotation vanishes.
         rotations[b] = 0.0;
-        rot += 1.0;
         start += t;
     }
 
