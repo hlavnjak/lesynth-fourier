@@ -1909,35 +1909,37 @@ impl SynthComputeEngine {
         
         let buffer_states = self.shared_params.buffer_states.lock().unwrap();
         let key_buffers = self.shared_params.key_buffers.lock().unwrap();
-        
-        match buffer_states[key] {
-            BufferState::Clean => {
-                if let Some(ref buffer) = key_buffers[key] {
-                    log::debug!("Using pre-computed buffer for key {}", key);
-                    return buffer.clone();
-                }
-            }
-            BufferState::Computing => {
-                // Check if we have an old buffer we can use while waiting
-                if let Some(ref buffer) = key_buffers[key] {
-                    log::debug!("Using old buffer for key {} while computing new one", key);
-                    return buffer.clone();
-                }
-            }
-            BufferState::Dirty => {
-                // Check if we have an old buffer we can use
-                if let Some(ref buffer) = key_buffers[key] {
-                    log::debug!("Using old buffer for key {} (marked dirty)", key);
-                    return buffer.clone();
-                }
+
+        // **Only a `Clean` buffer is this grid's.** `Dirty` and `Computing` both
+        // mean the grid moved after this buffer was rendered, and handing it to
+        // a voice plays the previous sound — which is how loading a source and
+        // pressing a key gave the default Synth patch's buzz while every
+        // offline render of the analysed grid measured clean. Rendering here
+        // costs a pause; playing the wrong instrument costs the user an
+        // afternoon deciding the synthesis is broken.
+        if buffer_states[key] == BufferState::Clean {
+            if let Some(ref buffer) = key_buffers[key] {
+                log::debug!("Using pre-computed buffer for key {}", key);
+                return buffer.clone();
             }
         }
-        
-        // Fallback to synchronous computation if no buffer available
+
         drop(buffer_states);
         drop(key_buffers);
-        log::warn!("Fallback to synchronous computation for key {}", key);
-        self.assemble_buffer_for_key(key)
+        log::debug!("Rendering key {key} synchronously: no buffer for the current grid");
+        let sound = self.assemble_buffer_for_key(key);
+
+        // Keep it, so this is paid once per key rather than once per press while
+        // the background thread works through the other 87.
+        if !sound.is_empty() {
+            let mut buffer_states = self.shared_params.buffer_states.lock().unwrap();
+            let mut key_buffers = self.shared_params.key_buffers.lock().unwrap();
+            if buffer_states[key] != BufferState::Computing {
+                key_buffers[key] = Some(sound.clone());
+                buffer_states[key] = BufferState::Clean;
+            }
+        }
+        sound
     }
 
     /// Replace the amplitude/phase grid with the result of an audio analysis.
@@ -3420,6 +3422,71 @@ mod keyboard_fidelity {
                 "key 48 (vib {vib}) is {got:.1} dB from the source it was analysed from"
             );
         }
+    }
+
+    /// How long the synchronous fallback in `get_buffer_for_key` actually takes,
+    /// since a MIDI note-on can reach it from the audio thread. Reported, not
+    /// asserted tightly — it is a budget, not a contract.
+    #[test]
+    fn the_synchronous_key_render_is_affordable() {
+        let sr = 48_000.0f32;
+        let (engine, _src) = analysed(24_000.0, 220.0, 0.03);
+        engine.shared_params.update_sample_rate(sr);
+        let t = std::time::Instant::now();
+        let out = engine.assemble_buffer_for_key(48);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        println!("synchronous key render: {ms:.1} ms for {} samples at {sr:.0} Hz", out.len());
+        assert!(!out.is_empty());
+    }
+
+    /// A key press must never play audio rendered from a **different grid**.
+    ///
+    /// `get_buffer_for_key` hands back the previous buffer whenever the key is
+    /// `Dirty` or `Computing`, to keep the audio thread from rendering. But
+    /// loading a source marks every key dirty while its old buffer — rendered
+    /// from whatever the grid was before, at startup the default Synth patch —
+    /// is still sitting there. So the first press after loading plays that,
+    /// which is neither the analysed sound nor anything the renderer is
+    /// responsible for, and no offline dump can see it.
+    #[test]
+    fn a_key_press_never_plays_a_buffer_from_the_previous_grid() {
+        let sr = 24_000.0f32;
+        let engine = SynthComputeEngine::new(Arc::new(LeSynthParams::default()));
+        engine.shared_params.update_sample_rate(sr);
+        let key = 48usize;
+
+        // Let the default Synth grid render, the way it does while the editor
+        // sits open before any audio is loaded.
+        let mut stale = Vec::new();
+        for _ in 0..600 {
+            if engine.shared_params.buffer_states.lock().unwrap()[key] == BufferState::Clean {
+                stale = engine.get_buffer_for_key(key);
+                if !stale.is_empty() {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!stale.is_empty(), "the Synth-mode buffer never rendered");
+
+        // Now load a source, as the Resynthesis panel does.
+        let (src, contour) = source(sr, 440.0, 1.0, 0.03);
+        engine.analyze_and_load(&src, sr, 440.0, &contour, 0);
+
+        // Press the key straight away.
+        let played = engine.get_buffer_for_key(key);
+        let analysed = engine.assemble_buffer_for_key(key);
+        let db = err_db(&played, &analysed);
+        println!(
+            "pressed right after load: {} samples vs the analysed {} ({db:.1} dB)",
+            played.len(),
+            analysed.len()
+        );
+        assert!(
+            db < -40.0,
+            "the key played {db:.1} dB from the analysed sound — it handed back the \
+             buffer rendered from the previous grid"
+        );
     }
 
     /// Changing the bucket count must not silently send every key back to the

@@ -273,6 +273,19 @@ impl SharedParams {
         self.playback_grid_dirty.store(true, Ordering::Relaxed);
 
         let mut buffer_states = self.buffer_states.lock().unwrap();
+        // **Drop the audio too, not just the flag.** These buffers were rendered
+        // from the grid that has just been replaced, and `get_buffer_for_key`
+        // hands a dirty key's old buffer straight to a voice rather than make
+        // the audio thread render. Loading a source therefore played the grid
+        // from *before* the load — at startup the default Synth patch, whose
+        // harmonics 11..256 sit at 0.05 and buzz — until the background thread
+        // caught up, which is 88 keys away and restarts on every edit. It sounds
+        // exactly like a synthesis defect and is invisible to every offline
+        // render, because the renderer was never asked.
+        let mut key_buffers = self.key_buffers.lock().unwrap();
+        for buffer in key_buffers.iter_mut() {
+            *buffer = None;
+        }
         for state in buffer_states.iter_mut() {
             if *state != BufferState::Dirty {
                 *state = BufferState::Dirty;
