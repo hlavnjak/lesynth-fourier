@@ -351,6 +351,46 @@ fn render_key_buffer(
         .min(max_harmonic)
         .min((min_period * 0.5).floor() as usize);
 
+    // With the source's own periods in hand, synthesise pitch-synchronously:
+    // one grain per output period, overlapped at the boundaries. The
+    // accumulator below cannot transpose coherently — see [`render_psola`] —
+    // and stays for grids that have no true periods to be synchronous with.
+    // Which renderer. At the source's own pitch the accumulator below *is* the
+    // exact inverse — the two clocks coincide, every bucket is read at the phase
+    // its rotation describes, and no cycle is ever spliced — so there is nothing
+    // for a resynthesis to improve and a measurable amount for it to lose (a
+    // steady tone: -60 dB against -52.7, and with vibrato -53.4 against -25.8,
+    // because PSOLA lays its grains on a smooth epoch grid of its own rather
+    // than on the recording's boundaries).
+    //
+    // Off that pitch the accumulator has no coherent answer at all and PSOLA
+    // does. The threshold is a cent, far below where either is audible, so the
+    // changeover cannot be heard.
+    let unity = timing
+        .map(|t| {
+            let p: f32 = t.periods.iter().sum();
+            let s: f32 = t.spans.iter().sum();
+            p > 0.0 && (s / p - 1.0).abs() < 6e-4
+        })
+        .unwrap_or(false);
+    // `LESYNTH_NO_PSOLA=1` forces the accumulator for every key: the A/B that
+    // shows what the resynthesis is worth on a given source, and the way the
+    // numbers in `a_transposed_key_is_not_spliced_out_of_several_buckets` were
+    // set. Not a supported setting — a bisection tool.
+    let forced_off = std::env::var_os("LESYNTH_NO_PSOLA").is_some();
+    if let Some(t) = timing.filter(|_| !unity && !forced_off) {
+        return render_psola(
+            ampl,
+            phase,
+            ampl_enabled,
+            phase_enabled,
+            t,
+            max_h,
+            target_samples,
+            cancel,
+        );
+    }
+
     loop {
         if drive_by_time && sound.len() >= target_samples {
             break;
@@ -424,6 +464,151 @@ fn render_key_buffer(
     sound
 }
 
+/// Synthesise a key by **pitch-synchronous overlap-add**: one grain per output
+/// period, each laid on the period boundary it came from, Hann-windowed two
+/// periods wide and overlapped at 50%.
+///
+/// This replaces a phase accumulator that read whichever bucket the wall clock
+/// pointed at, sample by sample. That is only coherent while the renderer's
+/// phase advances at the source's own rate — its own pitch, on the wall clock —
+/// because each bucket's phases are pre-rotated by the phase the *source* had
+/// reached there. On any other key the two clocks separate and a single
+/// rendered cycle gets spliced out of several buckets (four of them, two
+/// octaves down), each read at a phase its rotation does not describe. The
+/// result had the right harmonic amplitudes and the wrong harmonic phases,
+/// once per cycle, right through the formants: measured 18 dB worse than a
+/// linear-interpolation resampler, and audible on every key but the source's
+/// own pitch.
+///
+/// A grain fixes it by being self-contained. It is one bucket's waveform read
+/// from *its* phase origin (hence [`PlaybackGrid::rotations`]), so no rotation
+/// has to survive a bucket change, and the change itself becomes a cross-fade
+/// over one period instead of a splice. Grain spacing is the key's period, so
+/// transposing up repeats grains and down skips them — which is what PSOLA
+/// does, and it stays coherent at any ratio.
+///
+/// Hann windows two periods wide at one period's hop sum to 1, but the period
+/// moves with the source's pitch, so the window sum is accumulated and divided
+/// out rather than assumed.
+///
+/// `target_samples`: `> 0` walks the source's spans across that many samples
+/// ("preserve seconds"); `0` lays one grain per bucket, the Synth timeline.
+#[allow(clippy::too_many_arguments)]
+fn render_psola(
+    ampl: &[Vec<f32>],
+    phase: &[Vec<f32>],
+    ampl_enabled: &[bool],
+    phase_enabled: &[bool],
+    timing: &BucketTiming,
+    max_h: usize,
+    target_samples: usize,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Vec<f32> {
+    let nb = timing.periods.len();
+    if nb == 0 || max_h == 0 {
+        return Vec::new();
+    }
+    let drive_by_time = target_samples > 0;
+
+    // Where each bucket sits on the source's own clock, in output samples.
+    let mut cum = Vec::with_capacity(nb + 1);
+    let mut acc = 0.0f64;
+    cum.push(0.0f64);
+    for &s in timing.spans {
+        acc += (s as f64).max(1.0);
+        cum.push(acc);
+    }
+    let total = if drive_by_time {
+        target_samples as f64
+    } else {
+        timing.periods.iter().map(|&p| (p as f64).max(2.0)).sum()
+    };
+    if !(total >= 2.0) || acc <= 0.0 {
+        return Vec::new();
+    }
+    let n_out = total.ceil() as usize;
+    let mut out = vec![0.0f32; n_out];
+    let mut wsum = vec![0.0f32; n_out];
+
+    let mut cache = CycleCache::default();
+    let mut tau = 0.0f64; // the current epoch, in output samples
+    let mut epoch = 0usize;
+    let mut last_yield = 0usize;
+
+    while tau < total {
+        // Which bucket this grain comes from. Driven by time, the spans are
+        // stretched onto the note's length so the material still lasts the
+        // source's own seconds; on the Synth timeline it is one grain each.
+        let b = if drive_by_time {
+            let along = tau / total * acc;
+            match cum.binary_search_by(|c| c.partial_cmp(&along).unwrap()) {
+                Ok(i) => i.min(nb - 1),
+                Err(i) => i.saturating_sub(1).min(nb - 1),
+            }
+        } else {
+            if epoch >= nb {
+                break;
+            }
+            epoch
+        };
+
+        if let Some(c) = cancel {
+            if c.load(Ordering::Relaxed) {
+                return Vec::new();
+            }
+            if tau as usize - last_yield >= 8192 {
+                thread::sleep(Duration::from_millis(1));
+                last_yield = tau as usize;
+            }
+        }
+
+        let p = (timing.periods[b] as f64).max(2.0);
+        let dc = timing.dc.get(b).copied().unwrap_or(0.0);
+
+        // The grain spans one period either side of its epoch. `x` is the
+        // position within it in cycles, zero at the epoch, ±1 at the edges,
+        // which is both the Hann argument and the phase to read the bucket at.
+        let first = (tau - p).ceil() as i64;
+        let last = (tau + p).floor() as i64;
+        for idx in first..=last {
+            if idx < 0 || idx as usize >= n_out {
+                continue;
+            }
+            let x = (idx as f64 - tau) / p;
+            if x <= -1.0 || x >= 1.0 {
+                continue;
+            }
+            let w = 0.5 * (1.0 + (std::f64::consts::PI * x).cos());
+            // Read at the grain's own phase. The bucket's phases were baked with
+            // its absolute position subtracted (`rot` in `build_playback_grid`),
+            // so the table already *is* the source's waveform referenced to a
+            // shared origin: reading at zero returns the waveform at absolute
+            // phase zero, whatever bucket it came from. That is exactly what a
+            // grain wants, and it is why no rotation is undone here — adding
+            // `rot` back rotates each grain by a drifting amount and cost 33 dB.
+            let pos = x.rem_euclid(1.0) as f32;
+            let sample =
+                cache.sample(ampl, phase, ampl_enabled, phase_enabled, b, pos, max_h, 0);
+            out[idx as usize] += w as f32 * (sample + dc);
+            wsum[idx as usize] += w as f32;
+        }
+
+        tau += p;
+        epoch += 1;
+    }
+
+    // Divide the window sum back out. At a steady pitch it is 1 by construction;
+    // it moves where the period does, and at the very ends only one grain has
+    // landed, which would otherwise fade the note in and out.
+    for (v, w) in out.iter_mut().zip(&wsum) {
+        if *w > 1e-3 {
+            *v /= *w;
+        }
+        *v = v.clamp(-1.0, 1.0);
+    }
+    out
+}
+
 /// How a key's render is laid out over the source it came from. Every field is
 /// per bucket and in *output* samples.
 ///
@@ -448,11 +633,15 @@ struct BucketTiming<'a> {
     spans: &'a [f32],
     /// Per-bucket mean (FFT bin 0), on the normalised grid's scale.
     dc: &'a [f32],
+    /// Each bucket's baked phase origin — see [`PlaybackGrid::rotations`].
+    rotations: &'a [f32],
 }
 
 impl BucketTiming<'_> {
     fn describes(&self, num_buckets: usize) -> bool {
-        self.periods.len() == num_buckets && self.spans.len() == num_buckets
+        self.periods.len() == num_buckets
+            && self.spans.len() == num_buckets
+            && self.rotations.len() == num_buckets
     }
 }
 
@@ -697,6 +886,13 @@ pub struct PlaybackGrid {
     pub periods: Vec<f32>,
     /// The bucket's wall-clock span, in source samples: its recorded length.
     pub spans: Vec<f32>,
+    /// The phase origin baked into this bucket's phases: the fractional part of
+    /// how many fundamental cycles the source had run when the bucket starts.
+    ///
+    /// Reading the bucket's waveform at this position returns its own phase
+    /// zero — the period boundary. PSOLA needs exactly that, to lay each grain
+    /// on the boundary it came from.
+    pub rotations: Vec<f32>,
     /// What [`normalize_grid_per_bucket`] divided this grid by while building
     /// it. A key plays the normalised grid and does not care, but a caller
     /// reproducing the source's own level has to multiply it back in, and it is
@@ -762,6 +958,7 @@ pub fn build_playback_grid(
 
     let mut start = 0.0f64; // where this bucket begins in the source
     let mut rot = 0.0f64; // cycles the fundamental has run by then
+    let mut rotations = vec![0.0f32; nb];
     for b in 0..nb {
         let t = periods[b] as f64;
         // One cycle sampled over the true period. Sized to hold every harmonic
@@ -787,6 +984,7 @@ pub fn build_playback_grid(
             let ph = x.im.atan2(x.re) + std::f32::consts::FRAC_PI_2;
             out_phase[k - 1][b] = ph - TWO_PI * k as f32 * (rot as f32);
         }
+        rotations[b] = rot.rem_euclid(1.0) as f32;
         rot += lengths[b] as f64 / t;
         start += lengths[b] as f64;
     }
@@ -803,6 +1001,7 @@ pub fn build_playback_grid(
         dc: out_dc,
         periods,
         spans: lengths.iter().map(|&l| l as f32).collect(),
+        rotations,
         norm_divisor: divisor,
     })
 }
@@ -1069,7 +1268,12 @@ pub fn resynthesize_key(
         base_period.max(2.0),
         if max_harmonic == 0 { num_harmonics } else { max_harmonic },
         pitch_ratio,
-        Some(&BucketTiming { periods: &periods, spans: &spans, dc: &grid.dc }),
+        Some(&BucketTiming {
+            periods: &periods,
+            spans: &spans,
+            dc: &grid.dc,
+            rotations: &grid.rotations,
+        }),
         target_samples,
         None,
     );
@@ -1657,6 +1861,7 @@ impl SynthComputeEngine {
                 periods: p,
                 spans: s,
                 dc: &g.dc,
+                rotations: &g.rotations,
             }).as_ref(),
             target_samples,
             None,
@@ -1894,6 +2099,7 @@ impl SynthComputeEngine {
                 periods: p,
                 spans: s,
                 dc: &g.dc,
+                rotations: &g.rotations,
             }).as_ref(),
             target_samples,
             Some(&shared_params.computation_cancel),
@@ -3469,7 +3675,8 @@ mod keyboard_fidelity {
         let (periods, spans) = key_timing(&grid, &engine.shared_params, base_period).unwrap();
         let enabled = vec![true; grid.amplitude.len()];
         let ratios = engine.shared_params.bucket_pitch_ratio.lock().unwrap().clone();
-        let timing = BucketTiming { periods: &periods, spans: &spans, dc: &grid.dc };
+        let timing =
+            BucketTiming { periods: &periods, spans: &spans, dc: &grid.dc, rotations: &grid.rotations };
 
         // target_samples = 0: the Synth timeline, one cycle per bucket.
         let with_timing = render_key_buffer(
@@ -3496,6 +3703,102 @@ mod keyboard_fidelity {
             "with no duration the renderer produced the same audio with and without \
              the true periods ({db:.1} dB) — it discarded them"
         );
+    }
+
+    /// Is the gap at the source's own pitch a *drift* or a distortion? PSOLA
+    /// spaces its grains by the bucket's true period, while the source's own
+    /// period boundaries sit at those periods **rounded** to whole samples, so
+    /// the render walks slowly out of step with the recording it came from —
+    /// a fraction of a period over seconds. Sample-wise error counts that as
+    /// gross distortion (the trap in [[keyboard-render-source-timing]]), so
+    /// measure it per block with the alignment fitted out.
+    #[test]
+    fn the_sources_own_pitch_is_a_drift_not_a_distortion() {
+        for vib in [0.0f32, 0.03] {
+            the_sources_own_pitch_probe(vib);
+        }
+    }
+
+    fn the_sources_own_pitch_probe(vib: f32) {
+        let sr = 44_100.0f32;
+        let (engine, src) = analysed(sr, 440.0, vib);
+        let key = engine.assemble_buffer_for_key(48);
+        let n = key.len().min(src.len());
+        let block = 4096usize;
+        let (mut worst, mut sum, mut count) = (0.0f64, 0.0f64, 0usize);
+        let mut lags = Vec::new();
+        for start in (0..n.saturating_sub(block)).step_by(block) {
+            let a = &key[start..start + block];
+            // Best integer lag within a period, then gain-fit, per block.
+            let (mut best, mut best_lag) = (f64::INFINITY, 0i64);
+            for lag in -120i64..=120 {
+                let (mut num, mut den) = (0.0f64, 0.0f64);
+                for i in 0..block {
+                    let j = start as i64 + i as i64 + lag;
+                    if j < 0 || j as usize >= src.len() {
+                        continue;
+                    }
+                    num += a[i] as f64 * src[j as usize] as f64;
+                    den += (src[j as usize] as f64).powi(2);
+                }
+                if den <= 0.0 {
+                    continue;
+                }
+                let g = num / den;
+                let (mut e, mut r) = (0.0f64, 0.0f64);
+                for i in 0..block {
+                    let j = start as i64 + i as i64 + lag;
+                    if j < 0 || j as usize >= src.len() {
+                        continue;
+                    }
+                    let d = a[i] as f64 - g * src[j as usize] as f64;
+                    e += d * d;
+                    r += (g * src[j as usize] as f64).powi(2);
+                }
+                let db = 10.0 * (e.max(1e-300) / r.max(1e-300)).log10();
+                if db < best {
+                    best = db;
+                    best_lag = lag;
+                }
+            }
+            lags.push(best_lag);
+            worst = worst.max(best);
+            sum += best;
+            count += 1;
+        }
+        let mean = sum / count.max(1) as f64;
+        println!("vib {vib}: per-block, alignment fitted out: mean {mean:.1} dB, worst {worst:.1} dB");
+        println!("vib {vib}: block lags (samples): {lags:?}");
+        assert!(
+            mean < -45.0,
+            "at the source's own pitch the render is {mean:.1} dB from it even with the \
+             alignment fitted out — that is distortion, not drift"
+        );
+    }
+
+    /// Do the true periods still tile the source? `true_periods` fits the
+    /// contour's *shape* and scales it so the total matches the recorded
+    /// lengths, which pins the sum but lets the running total wander in
+    /// between. PSOLA places its grains by that running total, so any wander is
+    /// a time offset against the recording — and against the bucket the wall
+    /// clock is simultaneously pointing at.
+    #[test]
+    fn the_true_periods_track_the_recorded_boundaries() {
+        for vib in [0.0f32, 0.03] {
+            let sr = 44_100.0f32;
+            let (engine, _src) = analysed(sr, 440.0, vib);
+            let grid = playback_grid(&engine.shared_params).expect("analysed");
+            let lengths = engine.shared_params.analysis_bucket_lengths.lock().unwrap().clone();
+            let (mut cum, mut worst) = (0.0f64, 0.0f64);
+            for b in 0..grid.periods.len().min(lengths.len()) {
+                cum += grid.periods[b] as f64 - lengths[b] as f64;
+                worst = worst.max(cum.abs());
+            }
+            println!(
+                "vib {vib}: true periods vs recorded boundaries — worst running gap {worst:.2} \
+                 samples, closing at {cum:.2}"
+            );
+        }
     }
 
     /// A key press must never play audio rendered from a **different grid**.
