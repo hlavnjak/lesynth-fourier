@@ -878,6 +878,89 @@ pub unsafe extern "C" fn lesynth_fourier_resynthesize_key(
     sound.len() as i64
 }
 
+/// Render a key through a **live engine** — `load_analysis` then
+/// `assemble_buffer_for_key`, the exact calls the editor makes when a key is
+/// pressed — so an offline dump measures the integration and not just the
+/// renderer.
+///
+/// [`lesynth_fourier_resynthesize_key`] calls the pure function with a
+/// `PlaybackGrid` built by hand. That proves the *renderer* is sound and proves
+/// nothing about whether a running plugin ever reaches it: the live path builds
+/// its grid from `SharedParams`, and if any of the pieces the analysis is
+/// supposed to leave there is missing or the wrong length, `build_playback_grid`
+/// returns `None` and the key silently falls back to the contour renderer that
+/// buzzes. That fallback is invisible from outside — same call, same signature,
+/// different signal — which is what this entry point exists to expose.
+///
+/// Analyses `samples` exactly as the editor's own "analyse" does, loads the
+/// result into a fresh engine, and renders `key`. `out_used_playback_grid`, if
+/// non-null, reports whether the live path actually built the grid: `0` means
+/// the key fell back, and the audio is the old path whatever the renderer can
+/// do.
+///
+/// # Safety
+/// `samples` must point to `len` valid `f32`s; `contour`, if non-null, to
+/// `contour_len`; `out`, if non-null, to `out_cap` writable `f32`s;
+/// `out_used_playback_grid`, if non-null, to one writable `i32`.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn lesynth_fourier_render_key_live(
+    samples: *const f32,
+    len: usize,
+    sample_rate: f32,
+    out_sample_rate: f32,
+    base_freq: f32,
+    contour: *const f32,
+    contour_len: usize,
+    num_buckets: usize,
+    num_harmonics: usize,
+    key: usize,
+    out_used_playback_grid: *mut i32,
+    out: *mut f32,
+    out_cap: usize,
+) -> i64 {
+    if samples.is_null() || num_harmonics == 0 || key >= crate::constants::NUM_KEYS {
+        return -1;
+    }
+    let slice = std::slice::from_raw_parts(samples, len);
+    let contour = if contour.is_null() || contour_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(contour, contour_len)
+    };
+    let max_buckets = (crate::constants::NUM_OF_BUCKETS_MAX as usize).max(num_buckets);
+    let mut result = engine::analyze_subtrack(
+        slice,
+        sample_rate,
+        base_freq,
+        contour,
+        num_buckets,
+        num_harmonics,
+        max_buckets,
+    );
+    engine::normalize_for_display(&mut result, 0.9);
+
+    // A real engine, driven the way the editor drives it.
+    let params = std::sync::Arc::new(crate::params::LeSynthParams::default());
+    let eng = engine::SynthComputeEngine::new(params);
+
+    *eng.shared_params.analysis_sample_rate.lock().unwrap() = sample_rate;
+    *eng.shared_params.analysis_base_freq.lock().unwrap() = base_freq;
+    eng.shared_params.update_sample_rate(out_sample_rate);
+    eng.shared_params.set_execution_mode(engine::ExecutionMode::Analysis);
+    eng.load_analysis(&result);
+
+    let sound = eng.assemble_buffer_for_key(key);
+    if !out_used_playback_grid.is_null() {
+        *out_used_playback_grid = i32::from(eng.shared_params.used_playback_grid());
+    }
+    if !out.is_null() {
+        let n = sound.len().min(out_cap);
+        std::slice::from_raw_parts_mut(out, n).copy_from_slice(&sound[..n]);
+    }
+    sound.len() as i64
+}
+
 /// Serialises tests that touch process-global bridge state — the untargeted
 /// inbox and `PENDING_TOKEN` (where a concurrent `prepare_instance` would
 /// otherwise be claimed by the wrong test's instance). Poison is ignored: a

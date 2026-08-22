@@ -1411,6 +1411,24 @@ impl SynthComputeEngine {
     /// all-zero (untouched) row stays silent, and drawn curves keep their shape.
     pub fn set_num_buckets(&self, new_buckets: usize) {
         let new_buckets = new_buckets.max(1);
+        // An analysed grid's width is not a free parameter: it is one bucket per
+        // period of the source, and the analysis's own bucket lengths, DC and
+        // Nyquist rows are indexed by it. Resampling the rows alone leaves those
+        // describing a grid that no longer exists, and `build_playback_grid`
+        // answers a width mismatch with `None` — so every key would fall back to
+        // the contour renderer, silently, and start buzzing again.
+        //
+        // The editor already disables the control while input sound is loaded
+        // ("Locked: bucket count follows the loaded input sound"). This is the
+        // same rule where the invariant actually lives, so no other caller can
+        // break it either.
+        if !self.shared_params.analysis_bucket_lengths.lock().unwrap().is_empty() {
+            log::debug!(
+                "set_num_buckets({new_buckets}) ignored: the grid width follows the \
+                 analysed source"
+            );
+            return;
+        }
         {
             let mut amp = self.shared_params.amplitude_data.lock().unwrap();
             if amp.first().map(|r| r.len()) == Some(new_buckets) {
@@ -1607,6 +1625,11 @@ impl SynthComputeEngine {
             (Some(g), Some(_)) => (&g.amplitude, &g.phase),
             _ => (&ampl_data_normalized, &phase_data),
         };
+        // Record which of the two it was: falling back is silent, and it sounds
+        // like the defect the grid exists to remove.
+        self.shared_params
+            .used_playback_grid
+            .store(playback.is_some() && timing.is_some(), Ordering::Relaxed);
         let sound = render_key_buffer(
             num_harmonics,
             ampl,
@@ -1841,6 +1864,9 @@ impl SynthComputeEngine {
             (Some(g), Some(_)) => (&g.amplitude, &g.phase),
             _ => (&ampl_data_copy, &phase_data_copy),
         };
+        shared_params
+            .used_playback_grid
+            .store(playback.is_some() && timing.is_some(), Ordering::Relaxed);
         let sound = render_key_buffer(
             num_harmonics,
             ampl,
@@ -3307,6 +3333,63 @@ mod keyboard_fidelity {
         (engine, src)
     }
 
+    /// The live path and the offline one must render a key **the same**.
+    ///
+    /// They share `render_key_buffer`, so any gap is in what each hands it —
+    /// and that is exactly where a defect hides from an offline dump: the tool
+    /// says the renderer is clean while the plugin buzzes, because the tool was
+    /// never rendering what the plugin renders. Prints both sides' inputs, so a
+    /// failure names the parameter rather than just the dB.
+    #[test]
+    fn the_live_key_and_the_offline_key_are_the_same_render() {
+        let sr = 24_000.0f32;
+        let f0 = 107.63f32;
+        let (engine, _src) = analysed(sr, f0, 0.02);
+        engine.shared_params.update_sample_rate(sr);
+        let key = 24usize;
+
+        let live = engine.assemble_buffer_for_key(key);
+        assert!(
+            engine.shared_params.used_playback_grid(),
+            "the live path fell back to the contour renderer — the offline dump \
+             cannot see this, and it is what a key would sound like"
+        );
+
+        let base_period = engine.shared_params.piano_periods.lock().unwrap()[key];
+        let target = target_samples_for(&engine.shared_params);
+        let cap = max_harmonic_for_key(key);
+        let amp = engine.shared_params.amplitude_data.lock().unwrap().clone();
+        let phase = engine.shared_params.phase_data.lock().unwrap().clone();
+        let lengths = engine.shared_params.analysis_bucket_lengths.lock().unwrap().clone();
+        let dc = engine.shared_params.analysis_dc.lock().unwrap().clone();
+        let nyq = engine.shared_params.analysis_nyquist.lock().unwrap().clone();
+        let ratios = engine.shared_params.bucket_pitch_ratio.lock().unwrap().clone();
+        let a_rate = *engine.shared_params.analysis_sample_rate.lock().unwrap();
+        let b_freq = *engine.shared_params.analysis_base_freq.lock().unwrap();
+
+        println!(
+            "live : base_period {base_period:.3}, target {target}, cap {cap}, \
+             buckets {}, lengths {}, a_rate {a_rate}, b_freq {b_freq}, out {}",
+            amp[0].len(),
+            lengths.len(),
+            live.len()
+        );
+
+        let offline = resynthesize_key(
+            &amp, &phase, &lengths, &dc, &nyq, &ratios, base_period, b_freq, a_rate, sr,
+            cap, target, 0.0,
+        );
+        println!("offline: out {}", offline.len());
+        assert_eq!(live.len(), offline.len(), "the two paths disagree on length");
+        let db = err_db(&live, &offline);
+        println!("live vs offline: {db:.1} dB");
+        assert!(
+            db < -80.0,
+            "the live key render and the offline one are {db:.1} dB apart — same \
+             renderer, so one of the inputs above differs"
+        );
+    }
+
     /// **The requirement**: the key whose period *is* the source's must sound
     /// like the source, not like a rough copy of it — what "Original Pitch And
     /// Gain" plays, on a key.
@@ -3336,6 +3419,135 @@ mod keyboard_fidelity {
                 got < -45.0,
                 "key 48 (vib {vib}) is {got:.1} dB from the source it was analysed from"
             );
+        }
+    }
+
+    /// Changing the bucket count must not silently send every key back to the
+    /// contour renderer.
+    ///
+    /// `set_num_buckets` resamples the grid rows but leaves the analysis's
+    /// bucket lengths at their old count, and `build_playback_grid` refuses a
+    /// grid whose width disagrees with them. The refusal is silent — same call,
+    /// same signature — so the keyboard just starts buzzing again and nothing
+    /// in the offline dump or the other tests can see it.
+    #[test]
+    fn changing_the_bucket_count_keeps_the_playback_grid() {
+        let sr = 24_000.0f32;
+        let (engine, _src) = analysed(sr, 440.0, 0.03);
+        engine.shared_params.update_sample_rate(sr);
+        let before = engine.shared_params.amplitude_data.lock().unwrap()[0].len();
+
+        let _ = engine.assemble_buffer_for_key(48);
+        assert!(
+            engine.shared_params.used_playback_grid(),
+            "a freshly analysed grid must transpose from a PlaybackGrid"
+        );
+
+        engine.set_num_buckets(before / 2);
+        assert_eq!(
+            engine.shared_params.amplitude_data.lock().unwrap()[0].len(),
+            before,
+            "an analysed grid's width follows the source and must not be resampled"
+        );
+        let _ = engine.assemble_buffer_for_key(48);
+        assert!(
+            engine.shared_params.used_playback_grid(),
+            "after set_num_buckets({}) the key fell back to the contour renderer — \
+             the analysis lengths still describe {before} buckets",
+            before / 2
+        );
+    }
+
+    /// **What a key press actually plays.** `get_buffer_for_key` hands back the
+    /// *background* thread's render, which is a second copy of the render setup
+    /// — its own grid lookup, its own timing, its own parameter snapshot. Every
+    /// other test here, and the whole offline dump, exercises the synchronous
+    /// path instead, so a defect that lives only in the background copy is
+    /// inaudible to all of them and audible to the user on every key.
+    #[test]
+    fn what_a_key_press_plays_matches_the_synchronous_render() {
+        let sr = 24_000.0f32;
+        let (engine, _src) = analysed(sr, 440.0, 0.03);
+        engine.shared_params.update_sample_rate(sr);
+        let key = 48usize;
+
+        let sync = engine.assemble_buffer_for_key(key);
+
+        // Wait for the background thread to render this key, as the editor does.
+        let mut played = Vec::new();
+        for _ in 0..600 {
+            let state = engine.shared_params.buffer_states.lock().unwrap()[key];
+            if state == BufferState::Clean {
+                played = engine.get_buffer_for_key(key);
+                if !played.is_empty() {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!played.is_empty(), "the background thread never produced key {key}");
+        assert!(
+            engine.shared_params.used_playback_grid(),
+            "the background render fell back to the contour renderer"
+        );
+
+        println!("background {} samples, synchronous {}", played.len(), sync.len());
+        assert_eq!(played.len(), sync.len(), "the two paths disagree on length");
+        let db = err_db(&played, &sync);
+        println!("what a key press plays vs the synchronous render: {db:.1} dB");
+        assert!(
+            db < -80.0,
+            "the buffer a key press plays is {db:.1} dB from the synchronous render \
+             of the same key — they are supposed to be the same audio"
+        );
+    }
+
+    /// The same key, with the **device** running at a different rate from the
+    /// analysis — which is the normal case in a host and the one every other
+    /// test here misses, because `analysed()` leaves the two equal.
+    ///
+    /// A key's period comes from `piano_periods`, which is in device samples,
+    /// while the bucket's true period and span are in the source's. If the
+    /// conversion between them is wrong the note is still the right pitch and
+    /// the right length — `key_timing` scales both — so nothing obvious breaks;
+    /// what changes is how each bucket's cycle lands, which is heard as
+    /// roughness at the bucket rate and nowhere else.
+    #[test]
+    fn a_key_reproduces_the_source_at_a_device_rate_too() {
+        let analysis_sr = 24_000.0f32;
+        for &device_sr in &[24_000.0f32, 44_100.0, 48_000.0] {
+            for vib in [0.0f32, 0.03] {
+                // 440 Hz is key 48 exactly, so the key transposes by 1.0 and the
+                // render is comparable with the source itself.
+                let (engine, src) = analysed(analysis_sr, 440.0, vib);
+                engine.shared_params.update_sample_rate(device_sr);
+
+                let key = engine.assemble_buffer_for_key(48);
+                assert!(
+                    engine.shared_params.used_playback_grid(),
+                    "device {device_sr}: the key fell back to the contour renderer"
+                );
+
+                // The source at the device's rate is what this key should be.
+                let want = if (device_sr - analysis_sr).abs() < 0.5 {
+                    src.clone()
+                } else {
+                    resample_stream(&src, device_sr as f64 / analysis_sr as f64)
+                };
+                let got = err_db(&key, &want);
+                println!(
+                    "analysis {analysis_sr:.0} -> device {device_sr:.0}, vib {vib}: {got:.1} dB \
+                     ({} samples vs {})",
+                    key.len(),
+                    want.len()
+                );
+                assert!(
+                    got < -40.0,
+                    "device {device_sr:.0} Hz, vib {vib}: a key at the source's own pitch is \
+                     {got:.1} dB from it — the analysis rate is {analysis_sr:.0}, and this is \
+                     the only thing that changed"
+                );
+            }
         }
     }
 

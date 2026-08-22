@@ -213,6 +213,38 @@ pub fn draw_piano_keyboard(
             synth_compute_engine.update_assembled_chart_with_key24();
         }
 
+        // How a key is rendering, right now. `build_playback_grid` answers
+        // anything it cannot use with `None`, and the renderer then falls back
+        // to the contour path — same call, same signature, and the buzz the
+        // true-period grid exists to remove comes straight back. Nothing about
+        // that is visible from outside, which is exactly how it went unnoticed
+        // while offline dumps measured clean. So it is reported here.
+        if has_analysis {
+            let on_grid = synth_compute_engine.shared_params.used_playback_grid();
+            let (text, colour, hover) = if on_grid {
+                (
+                    "true-period grid",
+                    Color32::from_rgb(50, 150, 50),
+                    "Keys are transposing from the source's own true periods — the \
+                     render path that matches Original Pitch And Gain.",
+                )
+            } else {
+                (
+                    "⚠ contour fallback",
+                    Color32::from_rgb(200, 100, 50),
+                    "Keys are NOT using the source's true periods: the analysis is \
+                     missing the per-bucket lengths (an imported or pre-v3 grid), or \
+                     the grid's width no longer matches them. The renderer is then \
+                     working from bucket lengths rounded to whole samples, which is \
+                     heard as roughness at the bucket rate — the buzz. Re-analyse \
+                     the source to get it back.",
+                )
+            };
+            ui.separator();
+            ui.colored_label(colour, nih_plug_egui::egui::RichText::new(text).small())
+                .on_hover_text(hover);
+        }
+
         if resp.clicked() {
             let shared = &synth_compute_engine.shared_params;
             if playing {

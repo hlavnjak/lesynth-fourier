@@ -130,6 +130,12 @@ pub struct SharedParams {
     /// Set by [`mark_all_buffers_dirty`](Self::mark_all_buffers_dirty), which
     /// every grid edit already goes through.
     pub playback_grid_dirty: Arc<AtomicBool>,
+
+    /// Whether the last key render actually transposed from a
+    /// [`PlaybackGrid`](crate::engine::PlaybackGrid), or fell back to the
+    /// contour path. The fallback is silent and sounds like the buzz the grid
+    /// exists to remove, so it is worth being able to ask.
+    pub used_playback_grid: Arc<AtomicBool>,
 }
 
 impl SharedParams {
@@ -185,6 +191,7 @@ impl SharedParams {
             // dropping even that.
             playback_grid: Arc::new(Mutex::new(None)),
             playback_grid_dirty: Arc::new(AtomicBool::new(true)),
+            used_playback_grid: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -217,6 +224,12 @@ impl SharedParams {
     /// Set whether a keyboard note renders with all phases zeroed.
     pub fn set_zero_key_phases(&self, zero: bool) {
         self.zero_key_phases.store(zero, Ordering::Relaxed);
+    }
+
+    /// Whether the last key render transposed from a `PlaybackGrid` rather than
+    /// falling back to the contour path. Diagnostic: the fallback is silent.
+    pub fn used_playback_grid(&self) -> bool {
+        self.used_playback_grid.load(Ordering::Relaxed)
     }
 
     /// Current execution mode.
