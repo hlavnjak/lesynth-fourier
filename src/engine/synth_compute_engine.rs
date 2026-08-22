@@ -277,7 +277,6 @@ fn read_cycle(table: &[f32], pos: f32) -> f32 {
 /// given moment is found by walking the source at wall-clock speed, rather than
 /// by dividing the timeline into equal parts. `None` falls back to `ratios`,
 /// which is what Synth mode and pre-v3 grids use.
-///
 fn render_key_buffer(
     num_harmonics: usize,
     ampl: &[Vec<f32>],
@@ -575,27 +574,42 @@ fn render_psola(
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_OVERLAP)
         .clamp(0.0, 1.0);
+    // Which bucket the grain laid at `tau` (the `epoch`-th) comes from. Driven by
+    // time, the spans are stretched onto the note's length so the material still
+    // lasts the source's own seconds; on the Synth timeline it is one grain each.
+    let bucket_at = |tau: f64, epoch: usize| -> Option<usize> {
+        if drive_by_time {
+            let along = tau / total * acc;
+            Some(match cum.binary_search_by(|c| c.partial_cmp(&along).unwrap()) {
+                Ok(i) => i.min(nb - 1),
+                Err(i) => i.saturating_sub(1).min(nb - 1),
+            })
+        } else if epoch >= nb {
+            None
+        } else {
+            Some(epoch)
+        }
+    };
+
+    // Where each bucket's waveform starts, relative to the first — the running
+    // sum of the wrap ramps, since `ramp[b]` is exactly `h(b+1)(0) - h(b)(0)`.
+    // A grain's own ramp is then the difference between where it starts and
+    // where the *next* grain starts, which is what makes a splice join.
+    let mut origin = Vec::with_capacity(nb + 1);
+    let mut acc_ramp = 0.0f32;
+    origin.push(0.0f32);
+    for b in 0..nb {
+        acc_ramp += timing.ramp.get(b).copied().unwrap_or(0.0);
+        origin.push(acc_ramp);
+    }
+
     let mut cache = CycleCache::default();
     let mut tau = 0.0f64; // the current epoch, in output samples
     let mut epoch = 0usize;
     let mut last_yield = 0usize;
 
     while tau < total {
-        // Which bucket this grain comes from. Driven by time, the spans are
-        // stretched onto the note's length so the material still lasts the
-        // source's own seconds; on the Synth timeline it is one grain each.
-        let b = if drive_by_time {
-            let along = tau / total * acc;
-            match cum.binary_search_by(|c| c.partial_cmp(&along).unwrap()) {
-                Ok(i) => i.min(nb - 1),
-                Err(i) => i.saturating_sub(1).min(nb - 1),
-            }
-        } else {
-            if epoch >= nb {
-                break;
-            }
-            epoch
-        };
+        let Some(b) = bucket_at(tau, epoch) else { break };
 
         if let Some(c) = cancel {
             if c.load(Ordering::Relaxed) {
@@ -609,7 +623,29 @@ fn render_psola(
 
         let p = (timing.periods[b] as f64).max(2.0);
         let dc = timing.dc.get(b).copied().unwrap_or(0.0);
-        let ramp = timing.ramp.get(b).copied().unwrap_or(0.0);
+        // The ramp bridges this grain's start value to the **next grain's**,
+        // which is the bucket after this one only while the key is playing the
+        // source's own periods in order.
+        //
+        // It is not, wherever the key's period made the renderer skip a bucket
+        // (transposing down) or repeat one (transposing up). Bridging to `b + 1`
+        // there leaves the grain ending on material the next grain does not
+        // begin with — a step of about one ramp, at a *splice*, and the only
+        // joins where a step can appear at all. Measured on my_voice at 65 Hz,
+        // where 65% of the joins are splices, against the same cubic-corner
+        // measure taken at samples that are not joins at all (`tools/joinstep.py`
+        // in gemstone-daw — the control matters, because at a high key a cubic
+        // through four samples reads large everywhere):
+        //
+        //     no join      rms 0.0094      continuation rms 0.0040
+        //     splice       rms 0.0383  ->  four times the control
+        //
+        // Bridging to the bucket actually played next makes every join
+        // continuous by construction: a repeat gets no ramp at all (the grain is
+        // a closed loop, which is exactly what repeating a period means) and a
+        // skip gets the ramp across everything it skipped.
+        let next_b = bucket_at(tau + p, epoch + 1).unwrap_or((b + 1).min(nb - 1));
+        let ramp = origin[next_b.min(nb)] - origin[b];
 
         // The grain spans one period either side of its epoch. `x` is the
         // position within it in cycles, zero at the epoch, ±1 at the edges,
