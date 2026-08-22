@@ -13,11 +13,40 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use nih_plug_egui::egui::{Color32, CornerRadius, StrokeKind, Stroke, Vec2, Rect, pos2};
+use nih_plug_egui::egui::{Color32, CornerRadius, StrokeKind, Stroke, Vec2, Pos2, Rect, pos2};
 use crate::constants::NUM_KEYS;
 use crate::engine::SynthComputeEngine;
 use crate::engine::shared_params::{BufferState, ORIGINAL_PITCH_VOICE};
 use crate::voice::Voice;
+
+/// Where a key is drawn, and therefore where it is clicked. One function for
+/// both, so the two can never disagree about which key is under the pointer.
+fn key_rect(key_idx: usize, kb_rect: Rect, white_key_width: f32, keyboard_height: f32) -> Rect {
+    if is_black_key(key_idx) {
+        let black_key_width = white_key_width * 0.6;
+        let x = kb_rect.left() + get_black_key_x_pos(key_idx) * white_key_width
+            - black_key_width / 2.0;
+        Rect::from_min_size(
+            pos2(x, kb_rect.top()),
+            Vec2::new(black_key_width, keyboard_height * 0.6),
+        )
+    } else {
+        let x = kb_rect.left() + get_white_key_index(key_idx) as f32 * white_key_width;
+        Rect::from_min_size(
+            pos2(x, kb_rect.top()),
+            Vec2::new(white_key_width - 1.0, keyboard_height),
+        )
+    }
+}
+
+/// Which key a press at `pos` lands on, or `None` for a press off the keys.
+///
+/// `keys` is in **paint order** — white keys first, then the black ones that are
+/// drawn over them — and the search runs backwards, so a black key wins wherever
+/// the two overlap, exactly as the drawing does.
+fn key_at(pos: Pos2, keys: &[(usize, Rect)]) -> Option<usize> {
+    keys.iter().rev().find(|(_, r)| r.contains(pos)).map(|&(i, _)| i)
+}
 
 fn is_black_key(key_index: usize) -> bool {
     // Piano starts at A0. Offset by 9 to align with C-based chromatic scale
@@ -66,16 +95,21 @@ pub fn draw_piano_keyboard(
     let mut last_pressed_key_persist = egui_ctx
         .memory(|mem| mem.data.get_temp::<Option<usize>>(last_key_id_persist).unwrap_or(Some(15)));
 
+    // A key whose release arrived in the same frame as its own press, carried
+    // over so it can be let go on the next one — see the dispatch below.
+    let pending_release_id = last_key_id.with("pending_release");
+    let mut pending_release = egui_ctx
+        .memory(|mem| mem.data.get_temp::<Option<usize>>(pending_release_id).unwrap_or(None));
+
     let keyboard_height = window_height * 0.055;
-    let white_key_height = keyboard_height;
-    let black_key_height = keyboard_height * 0.6;
 
     // Calculate number of white keys for proper spacing
     let actual_white_keys = (0..NUM_KEYS).filter(|&i| !is_black_key(i)).count();
     let white_key_width = window_width / actual_white_keys as f32;
     let black_key_width = white_key_width * 0.6;
 
-    let mut pressed_this_frame: Option<usize> = None;
+    // Every key's rect, in paint order, for the hit test below.
+    let mut key_rects: Vec<(usize, Rect)> = Vec::with_capacity(NUM_KEYS);
 
     // Check if any voice is currently active for visual feedback
     let active_voices = {
@@ -274,12 +308,7 @@ pub fn draw_piano_keyboard(
             continue;
         }
 
-        let white_key_idx = get_white_key_index(key_idx);
-        let x = kb_rect.left() + white_key_idx as f32 * white_key_width;
-        let key_rect = Rect::from_min_size(
-            pos2(x, kb_rect.top()),
-            Vec2::new(white_key_width - 1.0, white_key_height),
-        );
+        let key_rect = key_rect(key_idx, kb_rect, white_key_width, keyboard_height);
 
         let resp = ui.interact(
             key_rect,
@@ -315,9 +344,7 @@ pub fn draw_piano_keyboard(
             StrokeKind::Outside,
         );
 
-        if resp.is_pointer_button_down_on() && input.pointer.any_pressed() {
-            pressed_this_frame = Some(key_idx);
-        }
+        key_rects.push((key_idx, key_rect));
     }
 
     // Draw black keys on top
@@ -326,11 +353,8 @@ pub fn draw_piano_keyboard(
             continue;
         }
 
-        let x = kb_rect.left() + get_black_key_x_pos(key_idx) * white_key_width - black_key_width / 2.0;
-        let key_rect = Rect::from_min_size(
-            pos2(x, kb_rect.top()),
-            Vec2::new(black_key_width, black_key_height),
-        );
+        let key_rect = key_rect(key_idx, kb_rect, white_key_width, keyboard_height);
+        let x = key_rect.left();
 
         let resp = ui.interact(
             key_rect,
@@ -369,8 +393,38 @@ pub fn draw_piano_keyboard(
             Color32::from_rgb(80, 80, 80),
         );
 
-        if resp.is_pointer_button_down_on() && input.pointer.any_pressed() {
-            pressed_this_frame = Some(key_idx);
+        key_rects.push((key_idx, key_rect));
+    }
+
+    // Which key was pressed, taken from the raw press events rather than from a
+    // `Response`.
+    //
+    // `is_pointer_button_down_on()` was the wrong instrument: egui clears that
+    // flag for any widget that also saw a *release* in the same frame
+    // (`context.rs`, `PointerEvent::Released`), so a click that began and ended
+    // between two repaints was invisible to it and the note was silently
+    // dropped — no voice, and therefore no blue key either, which is how it was
+    // spotted. egui says as much on `any_pressed`: "This can sometimes return
+    // true even if `any_down() == false` because a press can be shorter than one
+    // frame." The editor repaints only on input, so the window for that is wide
+    // — and widest right after a note starts, when the frame is busy, which is
+    // why it showed up when moving quickly from one held key to the next.
+    //
+    // `press_origin()` is no help either: it is cleared on release. The raw
+    // `Event::PointerButton` carries the position the press happened at and is
+    // never retracted, so that is what the keys are hit-tested against.
+    let mut pressed_this_frame: Option<usize> = None;
+    for event in &input.events {
+        if let nih_plug_egui::egui::Event::PointerButton {
+            pos,
+            button: nih_plug_egui::egui::PointerButton::Primary,
+            pressed: true,
+            ..
+        } = event
+        {
+            if let Some(key_idx) = key_at(*pos, &key_rects) {
+                pressed_this_frame = Some(key_idx);
+            }
         }
     }
 
@@ -420,6 +474,20 @@ pub fn draw_piano_keyboard(
     }
 
     if let Some(key_idx) = pressed_this_frame.or(keyboard_pressed_key) {
+        // Let go of whatever was still sounding first. A release and the next
+        // press land in the same frame often enough — release, move, click —
+        // and while this was an `if`/`else if` the press swallowed the release,
+        // so the previous key was never faded out and went on ringing under the
+        // new one, still lit blue.
+        if let Some(prev_key) = last_pressed_key.filter(|&p| p != key_idx) {
+            log::debug!("Key {} released (a new key took over)", prev_key);
+            let shared = &synth_compute_engine.shared_params;
+            let mut voices = shared.voices.lock().unwrap();
+            if let Some(v) = voices[prev_key].as_mut() {
+                v.fade_out_active = true;
+                v.fade_out_pos = 0;
+            }
+        }
         if Some(key_idx) != last_pressed_key {
             log::debug!("Key {} clicked", key_idx);
             {
@@ -439,13 +507,23 @@ pub fn draw_piano_keyboard(
             last_pressed_key = Some(key_idx);
             last_pressed_key_persist = Some(key_idx);
         }
-    } else if released || keyboard_released_key.is_some() {
-        let release_key = if let Some(kb_key) = keyboard_released_key {
-            Some(kb_key)
-        } else {
-            last_pressed_key
-        };
-        
+        // A click that was already over before this frame was drawn still has
+        // to be let go, or the note it just started would never stop. Carrying
+        // it to the next frame rather than fading it here also gives it a
+        // frame of sound — the shortest a click that spans two frames gets.
+        //
+        // The repaint has to be asked for: the editor only redraws on input, so
+        // a click followed by stillness would otherwise never reach the frame
+        // that lets the note go.
+        pending_release = if released { Some(key_idx) } else { None };
+        if pending_release.is_some() {
+            egui_ctx.request_repaint();
+        }
+    } else if released || keyboard_released_key.is_some() || pending_release.is_some() {
+        let release_key = keyboard_released_key
+            .or_else(|| if released { last_pressed_key } else { None })
+            .or(pending_release);
+
         if let Some(prev_key) = release_key {
             log::debug!("Key {} released", prev_key);
             {
@@ -460,6 +538,7 @@ pub fn draw_piano_keyboard(
             synth_compute_engine.update_plotted_mix();
             last_pressed_key = None;
         }
+        pending_release = None;
     }
 
     // Persist the updated values back into memory
@@ -467,5 +546,72 @@ pub fn draw_piano_keyboard(
         mem.data.insert_temp(last_key_id, last_pressed_key);
         mem.data
             .insert_temp(last_key_id_persist, last_pressed_key_persist);
+        mem.data.insert_temp(pending_release_id, pending_release);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The keyboard as `draw_piano_keyboard` lays it out, in paint order: white
+    /// keys first, then the black keys drawn over them.
+    fn laid_out(width: f32, height: f32) -> (Rect, Vec<(usize, Rect)>, f32) {
+        let kb = Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(width, height));
+        let whites = (0..NUM_KEYS).filter(|&i| !is_black_key(i)).count();
+        let w = width / whites as f32;
+        let mut keys: Vec<(usize, Rect)> = (0..NUM_KEYS)
+            .filter(|&i| !is_black_key(i))
+            .map(|i| (i, key_rect(i, kb, w, height)))
+            .collect();
+        keys.extend(
+            (0..NUM_KEYS)
+                .filter(|&i| is_black_key(i))
+                .map(|i| (i, key_rect(i, kb, w, height))),
+        );
+        (kb, keys, w)
+    }
+
+    /// A press anywhere on a white key that no black key covers must find that
+    /// white key, and every white key must be reachable — a hit test that
+    /// silently misses is the defect this exists to catch.
+    #[test]
+    fn every_white_key_is_hit_at_its_own_bottom_edge() {
+        let (kb, keys, _) = laid_out(1200.0, 60.0);
+        for i in (0..NUM_KEYS).filter(|&i| !is_black_key(i)) {
+            let r = key_rect(i, kb, 1200.0 / 52.0, 60.0);
+            // Below the black keys (they stop at 60% of the height), so this
+            // point belongs to the white key alone.
+            let p = pos2(r.center().x, kb.top() + 55.0);
+            assert_eq!(key_at(p, &keys), Some(i), "white key {i} missed at {p:?}");
+        }
+    }
+
+    /// A black key is drawn over its neighbours, so a press on the overlap is
+    /// the black key's — the search runs in reverse paint order for exactly
+    /// this. Getting it backwards lights the wrong key, which is how a missed
+    /// click first shows itself.
+    #[test]
+    fn a_black_key_wins_the_overlap_it_is_drawn_over() {
+        let (kb, keys, _) = laid_out(1200.0, 60.0);
+        for i in (0..NUM_KEYS).filter(|&i| is_black_key(i)) {
+            let r = key_rect(i, kb, 1200.0 / 52.0, 60.0);
+            let p = pos2(r.center().x, kb.top() + 5.0);
+            assert_eq!(key_at(p, &keys), Some(i), "black key {i} missed at {p:?}");
+            // The same column, below where the black key ends, is white again.
+            let below = key_at(pos2(r.center().x, kb.top() + 55.0), &keys);
+            assert!(
+                below.is_some_and(|k| !is_black_key(k)),
+                "below black key {i} should be a white key, got {below:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_press_off_the_keys_hits_nothing() {
+        let (kb, keys, _) = laid_out(1200.0, 60.0);
+        assert_eq!(key_at(pos2(-5.0, kb.top() + 10.0), &keys), None);
+        assert_eq!(key_at(pos2(600.0, kb.bottom() + 10.0), &keys), None);
+        assert_eq!(key_at(pos2(1300.0, kb.top() + 10.0), &keys), None);
+    }
 }
