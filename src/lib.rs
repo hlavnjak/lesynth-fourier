@@ -345,6 +345,97 @@ pub unsafe extern "C" fn lesynth_fourier_import_grid(
     0
 }
 
+/// Report a tagged instance's per-harmonic **enable** checkboxes — the Analysis
+/// panel's `amp` and `phase` toggles, one byte per harmonic (`1` = enabled).
+///
+/// These live beside the grid rather than in it: a disabled harmonic keeps its
+/// analysed row and is skipped at render time, so a host that saves only the
+/// grid reloads a track with every harmonic switched back on. Buffers are `nh`
+/// long, from [`lesynth_fourier_export_dims`]; harmonics past the instance's own
+/// row count are reported enabled, since a harmonic it does not have is not one
+/// the user switched off. Returns the number of harmonics written, or negative
+/// for an unknown/dead token.
+///
+/// # Safety
+/// Each non-null out pointer must be valid for `nh` writes.
+#[no_mangle]
+pub unsafe extern "C" fn lesynth_fourier_export_flags(
+    token: u64,
+    nh: u32,
+    out_amp_enabled: *mut u8,
+    out_phase_enabled: *mut u8,
+) -> i64 {
+    let Some(engine) = lookup_instance(token) else {
+        return -1;
+    };
+    let nh = nh as usize;
+    let sp = &engine.shared_params;
+    let amp = sp.harmonic_ampl_enabled.lock().unwrap();
+    let phase = sp.harmonic_phase_enabled.lock().unwrap();
+    if !out_amp_enabled.is_null() {
+        let out = std::slice::from_raw_parts_mut(out_amp_enabled, nh);
+        for (n, cell) in out.iter_mut().enumerate() {
+            *cell = u8::from(amp.get(n).copied().unwrap_or(true));
+        }
+    }
+    if !out_phase_enabled.is_null() {
+        let out = std::slice::from_raw_parts_mut(out_phase_enabled, nh);
+        for (n, cell) in out.iter_mut().enumerate() {
+            *cell = u8::from(phase.get(n).copied().unwrap_or(true));
+        }
+    }
+    nh as i64
+}
+
+/// Restore the per-harmonic enable checkboxes saved by
+/// [`lesynth_fourier_export_flags`]. Either pointer may be null to leave that
+/// set alone. Call it **after** `_import_grid`: loading a grid does not touch
+/// these flags, but it does rebuild the key buffers, and this re-dirties them so
+/// the restored selection is what the keyboard plays. Returns the number of
+/// harmonics applied, or negative for an unknown/dead token.
+///
+/// # Safety
+/// Each non-null pointer must be valid for `nh` reads.
+#[no_mangle]
+pub unsafe extern "C" fn lesynth_fourier_import_flags(
+    token: u64,
+    nh: u32,
+    amp_enabled: *const u8,
+    phase_enabled: *const u8,
+) -> i64 {
+    let Some(engine) = lookup_instance(token) else {
+        return -1;
+    };
+    let nh = nh as usize;
+    let sp = &engine.shared_params;
+    let mut applied = 0usize;
+    if !amp_enabled.is_null() {
+        let src = std::slice::from_raw_parts(amp_enabled, nh);
+        let mut flags = sp.harmonic_ampl_enabled.lock().unwrap();
+        let n = nh.min(flags.len());
+        for i in 0..n {
+            flags[i] = src[i] != 0;
+        }
+        applied = applied.max(n);
+    }
+    if !phase_enabled.is_null() {
+        let src = std::slice::from_raw_parts(phase_enabled, nh);
+        let mut flags = sp.harmonic_phase_enabled.lock().unwrap();
+        let n = nh.min(flags.len());
+        for i in 0..n {
+            flags[i] = src[i] != 0;
+        }
+        applied = applied.max(n);
+    }
+    // The same three steps the checkboxes themselves take: the flags change what
+    // every key renders, so the buffers and the assembled chart are stale.
+    engine.set_normalization_needed(true);
+    sp.mark_all_buffers_dirty();
+    engine.update_assembled_chart_with_key24();
+    engine.wake_editor();
+    applied as i64
+}
+
 /// Push a subtrack to be analysed by the instance tagged with `token`. The job
 /// waits in that instance alone, so another open editor cannot swallow it.
 /// Returns 0, `-1` on bad input, `-2` on an unknown/dead token.
@@ -1290,6 +1381,56 @@ mod state_registry_tests {
         assert_eq!(lens_out, lens_in);
         assert_eq!(dc_out, dc_in);
         assert_eq!(nyq_out, nyq_in);
+
+        drop(engine);
+    }
+
+    /// The per-harmonic enable checkboxes are not in the grid, so they need a
+    /// channel of their own — without one a saved track reloads with every
+    /// harmonic switched back on, silently undoing the user's selection.
+    #[test]
+    fn harmonic_enable_flags_round_trip() {
+        let _guard = lock_global_state();
+        let engine = new_engine();
+        let token = 11;
+        lesynth_fourier_prepare_instance(token);
+        register_new_instance(&engine);
+
+        let nh = NUM_HARMONICS;
+        let mut amp_in = vec![1u8; nh];
+        let mut phase_in = vec![1u8; nh];
+        amp_in[1] = 0;
+        amp_in[7] = 0;
+        phase_in[3] = 0;
+
+        let rc = unsafe {
+            lesynth_fourier_import_flags(token, nh as u32, amp_in.as_ptr(), phase_in.as_ptr())
+        };
+        assert_eq!(rc, nh as i64);
+        assert!(
+            !engine.shared_params.harmonic_ampl_enabled.lock().unwrap()[1],
+            "the import must reach the flags the renderer reads"
+        );
+
+        let mut amp_out = vec![0u8; nh];
+        let mut phase_out = vec![0u8; nh];
+        let rc = unsafe {
+            lesynth_fourier_export_flags(
+                token,
+                nh as u32,
+                amp_out.as_mut_ptr(),
+                phase_out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, nh as i64);
+        assert_eq!(amp_out, amp_in);
+        assert_eq!(phase_out, phase_in);
+
+        // An unknown token is an error, not a buffer left full of zeros that a
+        // caller would read as "every harmonic disabled".
+        assert!(unsafe {
+            lesynth_fourier_export_flags(9_999, nh as u32, amp_out.as_mut_ptr(), std::ptr::null_mut())
+        } < 0);
 
         drop(engine);
     }
