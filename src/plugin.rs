@@ -297,7 +297,6 @@ impl Plugin for LeSynth {
                 // The reactive gate lives in our egui-baseview fork's `on_frame`; this
                 // closure only runs on frames that will render, so always build a full UI.
                 let _ = (repaint_pending, size_changed);
-                log::info!("EGUI after return");
                 // Remember the built size.
                 egui_ctx.memory_mut(|m| m.data.insert_temp(size_id, screen_size));
 
