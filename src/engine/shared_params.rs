@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use crate::constants::NUM_KEYS;
 use crate::engine::ExecutionMode;
 use crate::voice::Voice;
@@ -28,6 +28,10 @@ pub const KEYBOARD_GAIN_MIN_DB: f32 = -60.0;
 /// Loudest the keyboard gain slider goes, in dB. The mixdown clamps the final
 /// sum either way, so this only bounds how far a note can be pushed into it.
 pub const KEYBOARD_GAIN_MAX_DB: f32 = 12.0;
+/// How far the incoming MIDI keyboard may be transposed, in octaves either way.
+/// Four is enough for a 32-key controller to reach either end of a piano.
+pub const MAX_KEYBOARD_OCTAVE_SHIFT: i32 = 4;
+
 /// Length of [`SharedParams::voices`]: one per key plus the original-pitch slot.
 pub const VOICE_SLOTS: usize = NUM_KEYS + 1;
 
@@ -132,6 +136,10 @@ pub struct SharedParams {
     /// the slider moves in: converting back and forth would let a drag drift.
     pub keyboard_gain_db: Arc<Mutex<f32>>,
 
+    /// Whole octaves every note arriving over MIDI is moved by — see
+    /// [`keyboard_octave_shift`](Self::keyboard_octave_shift).
+    pub keyboard_octave_shift: Arc<AtomicI32>,
+
     /// The grid keys transpose from, derived from the analysed one — see
     /// [`PlaybackGrid`](crate::engine::synth_compute_engine::PlaybackGrid). Built
     /// on first use and rebuilt whenever `playback_grid_dirty` says the analysis
@@ -200,6 +208,9 @@ impl SharedParams {
             // moved.
             keyboard_gain_db: Arc::new(Mutex::new(0.0)),
 
+            // The keyboard as it is played, until the picker says otherwise.
+            keyboard_octave_shift: Arc::new(AtomicI32::new(0)),
+
             // Off: the cycle table is the cheap path and matches the direct sum
             // to within its interpolation error. The checkbox trades CPU for
             // dropping even that.
@@ -246,6 +257,28 @@ impl SharedParams {
     pub fn set_keyboard_gain_db(&self, db: f32) {
         *self.keyboard_gain_db.lock().unwrap() =
             db.clamp(KEYBOARD_GAIN_MIN_DB, KEYBOARD_GAIN_MAX_DB);
+    }
+
+    /// Whole octaves that an incoming MIDI note is moved by before it is taken
+    /// for a key.
+    ///
+    /// A small controller — a Keystation Mini 32 is 32 keys from C3 — has no low
+    /// notes on it at all, so a bass part has to be played up where the keys are
+    /// and moved down. This moves the *incoming* notes only: the on-screen
+    /// keyboard already reaches all 88 keys, and an audition plays at the pitch
+    /// its phases belong to either way.
+    pub fn keyboard_octave_shift(&self) -> i32 {
+        self.keyboard_octave_shift
+            .load(Ordering::Relaxed)
+            .clamp(-MAX_KEYBOARD_OCTAVE_SHIFT, MAX_KEYBOARD_OCTAVE_SHIFT)
+    }
+
+    /// Set how far incoming MIDI is transposed, clamped to the picker's range.
+    pub fn set_keyboard_octave_shift(&self, octaves: i32) {
+        self.keyboard_octave_shift.store(
+            octaves.clamp(-MAX_KEYBOARD_OCTAVE_SHIFT, MAX_KEYBOARD_OCTAVE_SHIFT),
+            Ordering::Relaxed,
+        );
     }
 
     /// The keyboard's level as a linear factor, for the mixdown. Applied to

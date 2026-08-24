@@ -31,6 +31,13 @@ use crate::voice::Voice;
 pub struct LeSynth {
     synth_params: Arc<LeSynthParams>,
     pub synth_compute_engine: Arc<SynthComputeEngine>,
+    /// What each MIDI key that is *down* was transposed by, in semitones.
+    ///
+    /// A key takes the octave shift as it stood when it was struck and keeps it
+    /// until it comes back up. Without that, moving the picker with a key held
+    /// would send the note-off to a different key than the note-on built, and
+    /// the note would sound until the plugin was unloaded.
+    held_shift: [i8; 128],
 }
 
 impl Default for LeSynth {
@@ -45,6 +52,7 @@ impl Default for LeSynth {
         Self {
             synth_params,
             synth_compute_engine,
+            held_shift: [0; 128],
         }
     }
 }
@@ -99,6 +107,8 @@ impl Plugin for LeSynth {
         // Read once per block, not per sample: it is a slider, not an envelope,
         // and the lock has no business in the inner loop.
         let keyboard_gain = shared.keyboard_gain();
+        // Likewise a picker: one read for the whole block of events.
+        let octave_shift = shared.keyboard_octave_shift();
 
         // --- Handle incoming MIDI events (build/stop voices) ---
         // Wake the idle editor once after the batch if any voice changed.
@@ -106,6 +116,13 @@ impl Plugin for LeSynth {
         while let Some(event) = context.next_event() {
             match event {
                 NoteEvent::NoteOn { note, .. } => {
+                    // Moved by the octave picker first: a small controller has
+                    // no low keys on it, so a bass part is played up where the
+                    // keys are and shifted down here.
+                    let Some(note) = shift_note(note, true, octave_shift, &mut self.held_shift)
+                    else {
+                        continue;
+                    };
                     // MIDI A0 = note 21, our key 0 = A0, so subtract 21
                     let key_idx = (note as usize).saturating_sub(21);
                     if key_idx < NUM_KEYS {
@@ -124,6 +141,12 @@ impl Plugin for LeSynth {
                     }
                 }
                 NoteEvent::NoteOff { note, .. } => {
+                    // The release follows the note wherever the shift put it,
+                    // even if the picker has moved since.
+                    let Some(note) = shift_note(note, false, octave_shift, &mut self.held_shift)
+                    else {
+                        continue;
+                    };
                     let key_idx = (note as usize).saturating_sub(21);
                     if key_idx < NUM_KEYS {
                         let mut voices = shared.voices.lock().unwrap();
@@ -765,4 +788,54 @@ impl Vst3Plugin for LeSynth {
         Vst3SubCategory::Instrument,
         Vst3SubCategory::Tools,
     ];
+}
+
+/// Where a MIDI note lands after the octave picker, or `None` if that is off the
+/// end of MIDI and there is no such note to play.
+///
+/// `press` distinguishes a note going down — which takes the shift as it stands
+/// and is remembered by it in `held` — from its release, which follows it
+/// wherever it went. Moving the picker with a key held would otherwise build the
+/// voice on one key and try to release another, leaving the first sounding for
+/// good.
+fn shift_note(note: u8, press: bool, octaves: i32, held: &mut [i8; 128]) -> Option<u8> {
+    let key = (note & 0x7F) as usize;
+    let semitones = if press {
+        let semitones = octaves * 12;
+        held[key] = semitones as i8;
+        semitones
+    } else {
+        held[key] as i32
+    };
+    let shifted = key as i32 + semitones;
+    (0..=127).contains(&shifted).then_some(shifted as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shift_note;
+
+    /// The picker moves incoming notes by whole octaves, and a note pushed off
+    /// either end of MIDI is simply not played.
+    #[test]
+    fn the_picker_moves_incoming_notes_by_octaves() {
+        let mut held = [0i8; 128];
+        assert_eq!(shift_note(60, true, -2, &mut held), Some(36));
+        assert_eq!(shift_note(60, true, 0, &mut held), Some(60));
+        assert_eq!(shift_note(12, true, -2, &mut held), None);
+        assert_eq!(shift_note(120, true, 1, &mut held), None);
+    }
+
+    /// The stuck note this exists to prevent: the picker is moved while a key is
+    /// held, so the release would name a different key than the press built a
+    /// voice on.
+    #[test]
+    fn moving_the_picker_under_a_held_key_does_not_strand_the_voice() {
+        let mut held = [0i8; 128];
+        assert_eq!(shift_note(60, true, -1, &mut held), Some(48));
+        // …picker moved, key still down.
+        assert_eq!(shift_note(60, false, 3, &mut held), Some(48));
+        // The next press takes the shift as it stands now.
+        assert_eq!(shift_note(60, true, 3, &mut held), Some(96));
+    }
 }

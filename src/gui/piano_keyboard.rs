@@ -17,7 +17,8 @@ use nih_plug_egui::egui::{Color32, CornerRadius, StrokeKind, Stroke, Vec2, Pos2,
 use crate::constants::NUM_KEYS;
 use crate::engine::SynthComputeEngine;
 use crate::engine::shared_params::{
-    BufferState, KEYBOARD_GAIN_MAX_DB, KEYBOARD_GAIN_MIN_DB, ORIGINAL_PITCH_VOICE,
+    BufferState, KEYBOARD_GAIN_MAX_DB, KEYBOARD_GAIN_MIN_DB, MAX_KEYBOARD_OCTAVE_SHIFT,
+    ORIGINAL_PITCH_VOICE,
 };
 use crate::voice::Voice;
 
@@ -285,6 +286,45 @@ pub fn draw_piano_keyboard(
         ui.spacing_mut().slider_width = slider_width;
         if gain_resp.changed() {
             synth_compute_engine.shared_params.set_keyboard_gain_db(gain_db);
+        }
+
+        // Where an attached MIDI keyboard's keys land. A small controller — a
+        // Keystation Mini 32 is 32 keys from C3 — has no low notes on it at all,
+        // so a bass part has to be played up where the keys are and moved down
+        // here. Only incoming MIDI is moved: the keys drawn above already reach
+        // all 88, and clicking one means the key that was clicked.
+        ui.separator();
+        ui.label("MIDI octave");
+        let mut octaves = synth_compute_engine.shared_params.keyboard_octave_shift();
+        nih_plug_egui::egui::ComboBox::from_id_salt("midi_octave_shift")
+            .width(96.0)
+            // Room for all nine steps: the default caps a popup at 200 px and
+            // scrolls the rest, which hides the octaves this exists to reach.
+            .height(9.0 * 30.0)
+            .selected_text(octave_shift_label(octaves))
+            .show_ui(ui, |ui| {
+                for step in (-MAX_KEYBOARD_OCTAVE_SHIFT..=MAX_KEYBOARD_OCTAVE_SHIFT).rev() {
+                    ui.selectable_value(&mut octaves, step, octave_shift_label(step));
+                }
+            })
+            .response
+            .on_hover_text(
+                "Move every note arriving over MIDI by whole octaves before it is \
+                 taken for a key — how a 32-key controller reaches the bass.\n\n\
+                 A key already held keeps the shift it was pressed with, so moving \
+                 this mid-note cannot leave one sounding; a note that would fall off \
+                 either end of the keyboard is not played.\n\n\
+                 The keys drawn here are not moved: clicking one plays the key that \
+                 was clicked, and Original Pitch And Gain is untouched either way.",
+            );
+        // Written back by comparing, not by asking the box whether it changed: a
+        // `ComboBox`'s own response is the *button's*, and a value picked inside
+        // the popup does not mark it — the picker would draw the new step and
+        // never apply it.
+        if octaves != synth_compute_engine.shared_params.keyboard_octave_shift() {
+            synth_compute_engine
+                .shared_params
+                .set_keyboard_octave_shift(octaves);
         }
 
         // How a key is rendering, right now. `build_playback_grid` answers
@@ -641,5 +681,15 @@ mod tests {
         assert_eq!(key_at(pos2(-5.0, kb.top() + 10.0), &keys), None);
         assert_eq!(key_at(pos2(600.0, kb.bottom() + 10.0), &keys), None);
         assert_eq!(key_at(pos2(1300.0, kb.top() + 10.0), &keys), None);
+    }
+}
+
+/// How an octave shift reads in its select box: signed, and saying what it does
+/// rather than only how far.
+fn octave_shift_label(octaves: i32) -> String {
+    match octaves {
+        0 => "as played".to_string(),
+        n if n > 0 => format!("+{n} up"),
+        n => format!("−{} down", -n),
     }
 }
