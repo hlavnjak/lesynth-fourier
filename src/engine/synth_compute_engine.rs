@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use realfft::num_complex::Complex;
@@ -1407,6 +1407,11 @@ pub struct SynthComputeEngine {
     /// This instance's editor egui context, registered while its editor is open
     /// so off-thread events (host pushes, MIDI) can wake *this* idle editor.
     editor_ctx: Mutex<Option<nih_plug_egui::egui::Context>>,
+    /// Set once a grid has arrived from *outside* the params — a saved track
+    /// loaded over the ABI — instead of being built from them at construction.
+    /// It decides which way the editor syncs the Buckets slider and the grid:
+    /// see [`Self::grid_is_loaded`].
+    grid_is_loaded: AtomicBool,
 }
 
 impl SynthComputeEngine {
@@ -1417,6 +1422,7 @@ impl SynthComputeEngine {
             shared_params: Arc::new(SharedParams::new(NUM_HARMONICS, buckets)),
             pending_analysis: Mutex::new(None),
             editor_ctx: Mutex::new(None),
+            grid_is_loaded: AtomicBool::new(false),
         };
 
         // Start background computation thread
@@ -1674,6 +1680,21 @@ impl SynthComputeEngine {
             .first()
             .map(|r| r.len())
             .unwrap_or(0)
+    }
+
+    /// Whether this instance's grid came from a saved track rather than from
+    /// the params — see [`Self::load_grid`].
+    ///
+    /// The Buckets slider and the grid width can disagree, and which one is
+    /// right depends entirely on this. A plain host restores the *param* (its
+    /// own state) while the grid is still the default one built at
+    /// construction, so the grid must follow the slider. A grid loaded over the
+    /// ABI carries the width the user saved and the param is the stale one — it
+    /// is the slider that must follow the grid, or opening the editor resamples
+    /// the loaded track back to whatever the param happens to hold and the
+    /// saved bucket count is gone.
+    pub fn grid_is_loaded(&self) -> bool {
+        self.grid_is_loaded.load(Ordering::Relaxed)
     }
 
     /// Resize the per-bucket synthesis grid, resampling every harmonic's
@@ -2467,6 +2488,10 @@ impl SynthComputeEngine {
         self.shared_params
             .set_execution_mode(super::ExecutionMode::Analysis);
         self.load_analysis(&result);
+        // The grid is now the saved one, `nb` buckets wide, whatever the Buckets
+        // param says. From here the editor moves the slider to the grid instead
+        // of the other way round.
+        self.grid_is_loaded.store(true, Ordering::Relaxed);
     }
 }
 
@@ -2615,6 +2640,46 @@ mod tests {
             .iter()
             .all(|&x| (x - 1.0).abs() < 1e-6));
         assert_eq!(*engine.shared_params.bucket_pitch_ratio.lock().unwrap(), pitch_ratio);
+    }
+
+    /// The bucket count a track was saved with lives in the width of the grid
+    /// in its `.lsft` — the Buckets *param* is not in the file and comes up at
+    /// its default. So a loaded grid has to be the one the editor believes:
+    /// otherwise opening the editor applies the default param over it and the
+    /// count the user set is silently resampled away.
+    #[test]
+    fn a_loaded_grid_owns_the_bucket_count_the_param_does_not_carry() {
+        let engine = create_test_engine();
+        // Nothing loaded: the grid is what the params built, so a host that
+        // restores its own params is the one to believe.
+        assert!(!engine.grid_is_loaded());
+        assert_eq!(engine.num_buckets(), NUM_OF_BUCKETS_DEFAULT);
+
+        let nb = NUM_OF_BUCKETS_DEFAULT + 80;
+        engine.load_grid(
+            vec![vec![0.3f32; nb]; NUM_HARMONICS],
+            vec![vec![0.0f32; nb]; NUM_HARMONICS],
+            vec![1.0; nb],
+            220.0,
+            // Duration 0 — a hand-drawn Synth grid, which is exactly the case
+            // where the slider stays live and could overwrite the grid.
+            0.0,
+            44_100.0,
+            0.0,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(engine.num_buckets(), nb);
+        assert!(
+            engine.grid_is_loaded(),
+            "a grid from a saved track must outrank the Buckets param"
+        );
+        // And the slider still moves it afterwards: this marks where the count
+        // came from, it does not freeze it.
+        engine.set_num_buckets(nb + 10);
+        assert_eq!(engine.num_buckets(), nb + 10);
     }
 
     #[test]

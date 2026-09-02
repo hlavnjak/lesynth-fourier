@@ -663,16 +663,41 @@ impl Plugin for LeSynth {
                             // loaded.
                             let buckets_header = |ui: &mut egui::Ui| {
                                 let applied_id = egui::Id::new("applied_num_buckets");
-                                // Apply a restored param value to the grid once on open so
-                                // the grid matches the param. Never while input sound is
-                                // loaded (it would clobber the analysed grid).
+                                // Once on open, the slider and the grid are made to
+                                // agree. Which one gives way is not a detail: a saved
+                                // track's bucket count lives in the *grid* it was saved
+                                // with — the param is not in a `.lsft` and comes up at
+                                // its default — while a plain VST3 host restores the
+                                // *param* over a grid that is still the default one. Get
+                                // it the wrong way round and one of the two silently
+                                // loses the count the user set. Never while input sound
+                                // is loaded: the analysed grid's width is not a free
+                                // parameter, and the slider is disabled for it.
                                 if !has_analysis
                                     && ui.data(|d| d.get_temp::<i32>(applied_id)).is_none()
                                 {
-                                    let v = synth_params.num_buckets.value();
-                                    if synth_compute_engine.num_buckets() != v as usize {
-                                        synth_compute_engine.set_num_buckets(v as usize);
-                                    }
+                                    let grid = synth_compute_engine.num_buckets() as i32;
+                                    let v = if synth_compute_engine.grid_is_loaded() {
+                                        // The grid came from a saved track: move the
+                                        // slider onto it. Clamped, so a grid from
+                                        // outside the slider's range still leaves the
+                                        // param a value it can hold.
+                                        let v = grid.clamp(NUM_OF_BUCKETS_MIN, NUM_OF_BUCKETS_MAX);
+                                        if synth_params.num_buckets.value() != v {
+                                            setter.begin_set_parameter(&synth_params.num_buckets);
+                                            setter.set_parameter(&synth_params.num_buckets, v);
+                                            setter.end_set_parameter(&synth_params.num_buckets);
+                                        }
+                                        v
+                                    } else {
+                                        // The params are what was restored: build the
+                                        // grid to match them.
+                                        let v = synth_params.num_buckets.value();
+                                        if grid != v {
+                                            synth_compute_engine.set_num_buckets(v as usize);
+                                        }
+                                        v
+                                    };
                                     ui.data_mut(|d| d.insert_temp(applied_id, v));
                                 }
 
