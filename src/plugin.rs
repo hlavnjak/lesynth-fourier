@@ -374,398 +374,410 @@ impl Plugin for LeSynth {
                         // Draw metallic background
                         draw_metallic_background(ui, window_width, window_height);
 
-                        // (Analysis jobs are claimed + run at the top of this closure.)
-
-                        // Width available to section content once the card's
-                        // horizontal inner margin is subtracted, so nothing
-                        // overflows the consistent section borders.
-                        let pad = 10.0;
-                        let content_w = window_width - 2.0 * pad;
-
-                        // ── Execution-mode switch ─────────────────────────────────
-                        let mut mode = synth_compute_engine.shared_params.execution_mode();
-                        section(ui, "Mode", |ui| {
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .selectable_label(mode == ExecutionMode::Synth, "Synth")
-                                    .clicked()
-                                {
-                                    mode = ExecutionMode::Synth;
-                                }
-                                if ui
-                                    .selectable_label(mode == ExecutionMode::Analysis, "Analysis")
-                                    .clicked()
-                                {
-                                    mode = ExecutionMode::Analysis;
-                                }
-                            });
-                        });
-                        synth_compute_engine.shared_params.set_execution_mode(mode);
-                        ui.add_space(10.0);
-
-                        // Analysed audio loaded? Then the grid resolution comes from the
-                        // source and the Buckets slider must not override it.
-                        let has_analysis = *synth_compute_engine
-                            .shared_params
-                            .analysis_duration_secs
-                            .lock()
-                            .unwrap()
-                            > 0.0;
-
-                        let params_changed_action = || {
-                            synth_compute_engine.set_normalization_needed(true);
-
-                            // Rebuild buffers for currently active voices so changes are audible immediately
-                            {
-                                let shared = &synth_compute_engine.shared_params;
-                                let mut voices = shared.voices.lock().unwrap();
-                                for (slot_idx, slot) in voices.iter_mut().enumerate() {
-                                    if let Some(v) = slot.as_mut() {
-                                        // The original-pitch audition slot isn't a
-                                        // key — re-render it at the source's pitch,
-                                        // not from a key buffer.
-                                        v.buffer = if slot_idx == ORIGINAL_PITCH_VOICE {
-                                            synth_compute_engine
-                                                .assemble_buffer_at_original_pitch()
-                                        } else {
-                                            synth_compute_engine.get_buffer_for_key(slot_idx)
-                                        };
-                                        // keep current idx and fade states
-                                    }
-                                }
-                            }
-
-                            // Update assembled chart with key 24 for immediate preview
-                            synth_compute_engine.update_assembled_chart_with_key24();
-                        };
-
-                        // Keep original structure but make it responsive, wrapped
-                        // in a consistent bordered section card.
-                        let editor_title = if mode == ExecutionMode::Synth {
-                            "Harmonic Editor"
-                        } else {
-                            "Analysis"
-                        };
-                        section(ui, editor_title, |ui| {
-                        if mode == ExecutionMode::Synth {
-                        // 256 rows of heavy controls, rebuilt every frame by an
-                        // immediate-mode GUI, peg a CPU core even when idle. `show_rows`
-                        // builds only what is scrolled into view; the uniform row height
-                        // is learned from the per-row stride and cached in egui memory
-                        // (converges after one frame).
-                        let row_h_id = egui::Id::new("harmonic_row_height");
-                        let cached_row_h: f32 = egui_ctx
-                            .memory(|m| m.data.get_temp(row_h_id))
-                            .unwrap_or(500.0);
-                        let mut measured_row_h: Option<f32> = None;
-                        let mut prev_row_y: Option<f32> = None;
-
+                        // Every section below is sized off the window, so on a host
+                        // window shorter than the editor wants, the lower cards would
+                        // simply be cut off. Scroll the whole screen vertically, the
+                        // way the Gemstone DAW host scrolls its own panel. The
+                        // background stays outside it, painted across the window.
                         egui::ScrollArea::vertical()
-                            .auto_shrink([false; 2])
-                            .max_height(window_height * 0.24)
-                            .max_width(content_w)
-                            .show_rows(
-                                ui,
-                                cached_row_h,
-                                synth_params.harmonics.len(),
-                                |ui, row_range| {
-                                let spacing_y = ui.spacing().item_spacing.y;
-                                for idx in row_range {
-                                    let harmonic = &synth_params.harmonics[idx];
+                            .id_salt("editor_screen")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                            // (Analysis jobs are claimed + run at the top of this closure.)
 
-                                    // Learn the true (uniform) row height from the vertical
-                                    // stride between consecutive rows, minus the inter-row
-                                    // spacing egui inserts.
-                                    let row_y = ui.cursor().min.y;
-                                    if let (Some(p), None) = (prev_row_y, measured_row_h) {
-                                        measured_row_h = Some((row_y - p - spacing_y).max(1.0));
+                            // Width available to section content once the card's
+                            // horizontal inner margin is subtracted, so nothing
+                            // overflows the consistent section borders. Taken from
+                            // the scroll viewport rather than the window so the
+                            // panel's own margin is accounted for too.
+                            let pad = 10.0;
+                            let content_w = ui.available_width() - 2.0 * pad;
+
+                            // ── Execution-mode switch ─────────────────────────────────
+                            let mut mode = synth_compute_engine.shared_params.execution_mode();
+                            section(ui, "Mode", |ui| {
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(mode == ExecutionMode::Synth, "Synth")
+                                        .clicked()
+                                    {
+                                        mode = ExecutionMode::Synth;
                                     }
-                                    prev_row_y = Some(row_y);
+                                    if ui
+                                        .selectable_label(mode == ExecutionMode::Analysis, "Analysis")
+                                        .clicked()
+                                    {
+                                        mode = ExecutionMode::Analysis;
+                                    }
+                                });
+                            });
+                            synth_compute_engine.shared_params.set_execution_mode(mode);
+                            ui.add_space(10.0);
 
-                                    // ── Harmonic header ───────────────────────────────────────
-                                    egui::Frame::new()
-                                        .fill(egui::Color32::from_gray(58))
-                                        .inner_margin(egui::Margin::same(6i8))
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                egui::RichText::new(format!("Parameters for {}th harmonic:", idx + 1))
-                                                    .strong()
-                                                    .size(16.0)
-                                                    .color(egui::Color32::WHITE),
-                                            );
-                                        });
+                            // Analysed audio loaded? Then the grid resolution comes from the
+                            // source and the Buckets slider must not override it.
+                            let has_analysis = *synth_compute_engine
+                                .shared_params
+                                .analysis_duration_secs
+                                .lock()
+                                .unwrap()
+                                > 0.0;
 
-                                    // ── Amplitude Chart ───────────────────────────────────────
-                                    egui::Frame::new()
-                                        .fill(egui::Color32::from_rgb(35, 52, 46))
-                                        .inner_margin(egui::Margin::same(4i8))
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                egui::RichText::new("Amplitude Chart:")
-                                                    .strong()
-                                                    .size(13.0)
-                                                    .color(egui::Color32::WHITE),
-                                            );
-                                        });
+                            let params_changed_action = || {
+                                synth_compute_engine.set_normalization_needed(true);
 
-                                    egui::Frame::new()
-                                        .fill(egui::Color32::from_gray(30))
-                                        .inner_margin(egui::Margin::same(4i8))
-                                        .show(ui, |ui| {
-                                            draw_curve_controls(
-                                                ui,
-                                                idx,
-                                                ChartType::Amp,
-                                                harmonic,
-                                                synth_compute_engine.clone(),
-                                                setter,
-                                                &params_changed_action,
-                                                MIN_OFFSET_AMP,
-                                                MAX_OFFSET_AMP,
-                                                content_w - 8.0,
-                                            );
-                                        });
-
-                                    egui::Frame::new()
-                                        .fill(egui::Color32::from_rgb(18, 25, 45))
-                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 80, 140)))
-                                        .inner_margin(egui::Margin::same(6i8))
-                                        .show(ui, |ui| {
-                                            draw_nested_fourier_controls(
-                                                ui,
-                                                idx,
-                                                ChartType::Amp,
-                                                harmonic,
-                                                synth_compute_engine.clone(),
-                                                &params_changed_action,
-                                                content_w - 12.0,
-                                            );
-                                        });
-
-                                    // ── Phase Chart ───────────────────────────────────────────
-                                    egui::Frame::new()
-                                        .fill(egui::Color32::from_rgb(48, 35, 55))
-                                        .inner_margin(egui::Margin::same(4i8))
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                egui::RichText::new("Phase Chart:")
-                                                    .strong()
-                                                    .size(13.0)
-                                                    .color(egui::Color32::WHITE),
-                                            );
-                                        });
-
-                                    egui::Frame::new()
-                                        .fill(egui::Color32::from_gray(30))
-                                        .inner_margin(egui::Margin::same(4i8))
-                                        .show(ui, |ui| {
-                                            draw_curve_controls(
-                                                ui,
-                                                idx,
-                                                ChartType::Phase,
-                                                harmonic,
-                                                synth_compute_engine.clone(),
-                                                setter,
-                                                &params_changed_action,
-                                                MIN_OFFSET_PHASE,
-                                                MAX_OFFSET_PHASE,
-                                                content_w - 8.0,
-                                            );
-                                        });
-
-                                    egui::Frame::new()
-                                        .fill(egui::Color32::from_rgb(18, 25, 45))
-                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 80, 140)))
-                                        .inner_margin(egui::Margin::same(6i8))
-                                        .show(ui, |ui| {
-                                            draw_nested_fourier_controls(
-                                                ui,
-                                                idx,
-                                                ChartType::Phase,
-                                                harmonic,
-                                                synth_compute_engine.clone(),
-                                                &params_changed_action,
-                                                content_w - 12.0,
-                                            );
-                                        });
-
-                                    ui.add_space(4.0);
+                                // Rebuild buffers for currently active voices so changes are audible immediately
+                                {
+                                    let shared = &synth_compute_engine.shared_params;
+                                    let mut voices = shared.voices.lock().unwrap();
+                                    for (slot_idx, slot) in voices.iter_mut().enumerate() {
+                                        if let Some(v) = slot.as_mut() {
+                                            // The original-pitch audition slot isn't a
+                                            // key — re-render it at the source's pitch,
+                                            // not from a key buffer.
+                                            v.buffer = if slot_idx == ORIGINAL_PITCH_VOICE {
+                                                synth_compute_engine
+                                                    .assemble_buffer_at_original_pitch()
+                                            } else {
+                                                synth_compute_engine.get_buffer_for_key(slot_idx)
+                                            };
+                                            // keep current idx and fade states
+                                        }
+                                    }
                                 }
-                                },
-                            );
 
-                        // Persist the measured row height so the next frame's
-                        // virtualization math is exact.
-                        if let Some(h) = measured_row_h {
-                            if (h - cached_row_h).abs() > 0.5 {
-                                egui_ctx.memory_mut(|m| m.data.insert_temp(row_h_id, h));
-                                egui_ctx.request_repaint();
-                            }
-                        }
-                        } else {
-                            // Analysis mode: per-harmonic enable/disable grid.
-                            // Reuse the exact same fixed-height scroll area as Synth
-                            // mode so the control box occupies identical space and the
-                            // keyboard + charts below line up in both modes.
+                                // Update assembled chart with key 24 for immediate preview
+                                synth_compute_engine.update_assembled_chart_with_key24();
+                            };
+
+                            // Keep original structure but make it responsive, wrapped
+                            // in a consistent bordered section card.
+                            let editor_title = if mode == ExecutionMode::Synth {
+                                "Harmonic Editor"
+                            } else {
+                                "Analysis"
+                            };
+                            section(ui, editor_title, |ui| {
+                            if mode == ExecutionMode::Synth {
+                            // 256 rows of heavy controls, rebuilt every frame by an
+                            // immediate-mode GUI, peg a CPU core even when idle. `show_rows`
+                            // builds only what is scrolled into view; the uniform row height
+                            // is learned from the per-row stride and cached in egui memory
+                            // (converges after one frame).
+                            let row_h_id = egui::Id::new("harmonic_row_height");
+                            let cached_row_h: f32 = egui_ctx
+                                .memory(|m| m.data.get_temp(row_h_id))
+                                .unwrap_or(500.0);
+                            let mut measured_row_h: Option<f32> = None;
+                            let mut prev_row_y: Option<f32> = None;
+
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false; 2])
                                 .max_height(window_height * 0.24)
                                 .max_width(content_w)
-                                .show(ui, |ui| {
-                                    egui::Frame::new()
-                                        .fill(egui::Color32::from_rgb(18, 25, 45))
-                                        .inner_margin(egui::Margin::same(6i8))
-                                        .show(ui, |ui| {
-                                            draw_analysis_controls(
-                                                ui,
-                                                &synth_compute_engine,
-                                                content_w - 12.0,
-                                                window_height,
-                                            );
-                                        });
-                                });
-                        }
-                        });
-                        ui.add_space(10.0);
+                                .show_rows(
+                                    ui,
+                                    cached_row_h,
+                                    synth_params.harmonics.len(),
+                                    |ui, row_range| {
+                                    let spacing_y = ui.spacing().item_spacing.y;
+                                    for idx in row_range {
+                                        let harmonic = &synth_params.harmonics[idx];
 
-                        // ── Keyboard ──────────────────────────────────────────────
-                        section(ui, "Keyboard", |ui| {
-                            let input = ui.input(|i| i.clone());
-                            let gutter = 10.0;
-                            draw_piano_keyboard(
-                                egui_ctx,
-                                ui,
-                                &input,
-                                last_key_id,
-                                last_key_id_persist,
-                                &synth_compute_engine,
-                                content_w - 1.5 * gutter,
-                                window_height,
-                                1.0,
-                            );
-                        });
-                        ui.add_space(10.0);
+                                        // Learn the true (uniform) row height from the vertical
+                                        // stride between consecutive rows, minus the inter-row
+                                        // spacing egui inserts.
+                                        let row_y = ui.cursor().min.y;
+                                        if let (Some(p), None) = (prev_row_y, measured_row_h) {
+                                            measured_row_h = Some((row_y - p - spacing_y).max(1.0));
+                                        }
+                                        prev_row_y = Some(row_y);
 
-                        // ── Live harmonics ────────────────────────────────────────
-                        // Buckets (envelope time-resolution) sits in the caption row so it
-                        // never grows the section, and is disabled while input sound is
-                        // loaded.
-                        let buckets_header = |ui: &mut egui::Ui| {
-                            let applied_id = egui::Id::new("applied_num_buckets");
-                            // Apply a restored param value to the grid once on open so
-                            // the grid matches the param. Never while input sound is
-                            // loaded (it would clobber the analysed grid).
-                            if !has_analysis
-                                && ui.data(|d| d.get_temp::<i32>(applied_id)).is_none()
-                            {
-                                let v = synth_params.num_buckets.value();
-                                if synth_compute_engine.num_buckets() != v as usize {
-                                    synth_compute_engine.set_num_buckets(v as usize);
-                                }
-                                ui.data_mut(|d| d.insert_temp(applied_id, v));
-                            }
+                                        // ── Harmonic header ───────────────────────────────────────
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_gray(58))
+                                            .inner_margin(egui::Margin::same(6i8))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format!("Parameters for {}th harmonic:", idx + 1))
+                                                        .strong()
+                                                        .size(16.0)
+                                                        .color(egui::Color32::WHITE),
+                                                );
+                                            });
 
-                            // Push the control group toward the window's horizontal
-                            // centre (approx: the group is ~230 px wide).
-                            let middle = ui.min_rect().left() + content_w * 0.5;
-                            let space = (middle - 115.0 - ui.cursor().min.x).max(8.0);
-                            ui.add_space(space);
+                                        // ── Amplitude Chart ───────────────────────────────────────
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(35, 52, 46))
+                                            .inner_margin(egui::Margin::same(4i8))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new("Amplitude Chart:")
+                                                        .strong()
+                                                        .size(13.0)
+                                                        .color(egui::Color32::WHITE),
+                                                );
+                                            });
 
-                            ui.label(
-                                egui::RichText::new("Buckets:")
-                                    .strong()
-                                    .color(egui::Color32::WHITE),
-                            );
-                            let resp = ui.add_enabled(
-                                !has_analysis,
-                                ParamSlider::for_param(&synth_params.num_buckets, setter),
-                            );
-                            if has_analysis {
-                                resp.on_hover_text(
-                                    "Locked: bucket count follows the loaded input sound",
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_gray(30))
+                                            .inner_margin(egui::Margin::same(4i8))
+                                            .show(ui, |ui| {
+                                                draw_curve_controls(
+                                                    ui,
+                                                    idx,
+                                                    ChartType::Amp,
+                                                    harmonic,
+                                                    synth_compute_engine.clone(),
+                                                    setter,
+                                                    &params_changed_action,
+                                                    MIN_OFFSET_AMP,
+                                                    MAX_OFFSET_AMP,
+                                                    content_w - 8.0,
+                                                );
+                                            });
+
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(18, 25, 45))
+                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 80, 140)))
+                                            .inner_margin(egui::Margin::same(6i8))
+                                            .show(ui, |ui| {
+                                                draw_nested_fourier_controls(
+                                                    ui,
+                                                    idx,
+                                                    ChartType::Amp,
+                                                    harmonic,
+                                                    synth_compute_engine.clone(),
+                                                    &params_changed_action,
+                                                    content_w - 12.0,
+                                                );
+                                            });
+
+                                        // ── Phase Chart ───────────────────────────────────────────
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(48, 35, 55))
+                                            .inner_margin(egui::Margin::same(4i8))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new("Phase Chart:")
+                                                        .strong()
+                                                        .size(13.0)
+                                                        .color(egui::Color32::WHITE),
+                                                );
+                                            });
+
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_gray(30))
+                                            .inner_margin(egui::Margin::same(4i8))
+                                            .show(ui, |ui| {
+                                                draw_curve_controls(
+                                                    ui,
+                                                    idx,
+                                                    ChartType::Phase,
+                                                    harmonic,
+                                                    synth_compute_engine.clone(),
+                                                    setter,
+                                                    &params_changed_action,
+                                                    MIN_OFFSET_PHASE,
+                                                    MAX_OFFSET_PHASE,
+                                                    content_w - 8.0,
+                                                );
+                                            });
+
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(18, 25, 45))
+                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 80, 140)))
+                                            .inner_margin(egui::Margin::same(6i8))
+                                            .show(ui, |ui| {
+                                                draw_nested_fourier_controls(
+                                                    ui,
+                                                    idx,
+                                                    ChartType::Phase,
+                                                    harmonic,
+                                                    synth_compute_engine.clone(),
+                                                    &params_changed_action,
+                                                    content_w - 12.0,
+                                                );
+                                            });
+
+                                        ui.add_space(4.0);
+                                    }
+                                    },
                                 );
+
+                            // Persist the measured row height so the next frame's
+                            // virtualization math is exact.
+                            if let Some(h) = measured_row_h {
+                                if (h - cached_row_h).abs() > 0.5 {
+                                    egui_ctx.memory_mut(|m| m.data.insert_temp(row_h_id, h));
+                                    egui_ctx.request_repaint();
+                                }
+                            }
                             } else {
-                                // Applying a new bucket count resizes the grid and
-                                // invalidates all key buffers — too heavy to run per
-                                // frame. Commit only on drag release or a typed value,
-                                // never mid-drag.
-                                let committed =
-                                    resp.drag_stopped() || (resp.changed() && !resp.dragged());
-                                if committed {
+                                // Analysis mode: per-harmonic enable/disable grid.
+                                // Reuse the exact same fixed-height scroll area as Synth
+                                // mode so the control box occupies identical space and the
+                                // keyboard + charts below line up in both modes.
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false; 2])
+                                    .max_height(window_height * 0.24)
+                                    .max_width(content_w)
+                                    .show(ui, |ui| {
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(18, 25, 45))
+                                            .inner_margin(egui::Margin::same(6i8))
+                                            .show(ui, |ui| {
+                                                draw_analysis_controls(
+                                                    ui,
+                                                    &synth_compute_engine,
+                                                    content_w - 12.0,
+                                                    window_height,
+                                                );
+                                            });
+                                    });
+                            }
+                            });
+                            ui.add_space(10.0);
+
+                            // ── Keyboard ──────────────────────────────────────────────
+                            section(ui, "Keyboard", |ui| {
+                                let input = ui.input(|i| i.clone());
+                                let gutter = 10.0;
+                                draw_piano_keyboard(
+                                    egui_ctx,
+                                    ui,
+                                    &input,
+                                    last_key_id,
+                                    last_key_id_persist,
+                                    &synth_compute_engine,
+                                    content_w - 1.5 * gutter,
+                                    window_height,
+                                    1.0,
+                                );
+                            });
+                            ui.add_space(10.0);
+
+                            // ── Live harmonics ────────────────────────────────────────
+                            // Buckets (envelope time-resolution) sits in the caption row so it
+                            // never grows the section, and is disabled while input sound is
+                            // loaded.
+                            let buckets_header = |ui: &mut egui::Ui| {
+                                let applied_id = egui::Id::new("applied_num_buckets");
+                                // Apply a restored param value to the grid once on open so
+                                // the grid matches the param. Never while input sound is
+                                // loaded (it would clobber the analysed grid).
+                                if !has_analysis
+                                    && ui.data(|d| d.get_temp::<i32>(applied_id)).is_none()
+                                {
                                     let v = synth_params.num_buckets.value();
-                                    if ui.data(|d| d.get_temp::<i32>(applied_id)) != Some(v) {
+                                    if synth_compute_engine.num_buckets() != v as usize {
                                         synth_compute_engine.set_num_buckets(v as usize);
-                                        ui.data_mut(|d| d.insert_temp(applied_id, v));
+                                    }
+                                    ui.data_mut(|d| d.insert_temp(applied_id, v));
+                                }
+
+                                // Push the control group toward the window's horizontal
+                                // centre (approx: the group is ~230 px wide).
+                                let middle = ui.min_rect().left() + content_w * 0.5;
+                                let space = (middle - 115.0 - ui.cursor().min.x).max(8.0);
+                                ui.add_space(space);
+
+                                ui.label(
+                                    egui::RichText::new("Buckets:")
+                                        .strong()
+                                        .color(egui::Color32::WHITE),
+                                );
+                                let resp = ui.add_enabled(
+                                    !has_analysis,
+                                    ParamSlider::for_param(&synth_params.num_buckets, setter),
+                                );
+                                if has_analysis {
+                                    resp.on_hover_text(
+                                        "Locked: bucket count follows the loaded input sound",
+                                    );
+                                } else {
+                                    // Applying a new bucket count resizes the grid and
+                                    // invalidates all key buffers — too heavy to run per
+                                    // frame. Commit only on drag release or a typed value,
+                                    // never mid-drag.
+                                    let committed =
+                                        resp.drag_stopped() || (resp.changed() && !resp.dragged());
+                                    if committed {
+                                        let v = synth_params.num_buckets.value();
+                                        if ui.data(|d| d.get_temp::<i32>(applied_id)) != Some(v) {
+                                            synth_compute_engine.set_num_buckets(v as usize);
+                                            ui.data_mut(|d| d.insert_temp(applied_id, v));
+                                        }
                                     }
                                 }
-                            }
-                        };
-                        section_with_header(ui, "Live Harmonics", buckets_header, |ui| {
-                            let gutter = 10.0;
-                            let chart_w = (content_w - gutter) * 0.5;
-                            let chart_h = (window_height * 0.23).max(160.0);
-                            // Anchor the harmonic plots to the live flow cursor (inside
-                            // this card) so the absolute rects below line up with the
-                            // space reserved by allocate_space() and stay within the
-                            // section border.
-                            let plot_start_point =
-                                egui::pos2(ui.cursor().min.x, ui.cursor().min.y);
-                            let right_w = chart_w - gutter;
+                            };
+                            section_with_header(ui, "Live Harmonics", buckets_header, |ui| {
+                                let gutter = 10.0;
+                                let chart_w = (content_w - gutter) * 0.5;
+                                let chart_h = (window_height * 0.23).max(160.0);
+                                // Anchor the harmonic plots to the live flow cursor (inside
+                                // this card) so the absolute rects below line up with the
+                                // space reserved by allocate_space() and stay within the
+                                // section border.
+                                let plot_start_point =
+                                    egui::pos2(ui.cursor().min.x, ui.cursor().min.y);
+                                let right_w = chart_w - gutter;
 
-                            let left_rect = egui::Rect::from_min_size(
-                                plot_start_point,
-                                egui::vec2(chart_w, chart_h),
-                            );
+                                let left_rect = egui::Rect::from_min_size(
+                                    plot_start_point,
+                                    egui::vec2(chart_w, chart_h),
+                                );
 
-                            let right_rect = egui::Rect::from_min_size(
-                                plot_start_point + egui::vec2(chart_w + gutter, 0.0),
-                                egui::vec2(right_w, chart_h),
-                            );
+                                let right_rect = egui::Rect::from_min_size(
+                                    plot_start_point + egui::vec2(chart_w + gutter, 0.0),
+                                    egui::vec2(right_w, chart_h),
+                                );
 
-                            ui.allocate_space(egui::vec2(content_w, chart_h));
+                                ui.allocate_space(egui::vec2(content_w, chart_h));
 
-                            ui.allocate_new_ui(
-                                egui::UiBuilder::new()
-                                    .max_rect(left_rect)
-                                    .layout(*ui.layout()),
-                                |ui| {
-                                    draw_harmonic_plot(
-                                        ui,
-                                        "Amplitude",
-                                        ChartType::Amp,
-                                        chart_w,
-                                        chart_h,
-                                        &synth_compute_engine,
-                                    );
-                                },
-                            );
+                                ui.allocate_new_ui(
+                                    egui::UiBuilder::new()
+                                        .max_rect(left_rect)
+                                        .layout(*ui.layout()),
+                                    |ui| {
+                                        draw_harmonic_plot(
+                                            ui,
+                                            "Amplitude",
+                                            ChartType::Amp,
+                                            chart_w,
+                                            chart_h,
+                                            &synth_compute_engine,
+                                        );
+                                    },
+                                );
 
-                            ui.allocate_new_ui(
-                                egui::UiBuilder::new()
-                                    .max_rect(right_rect)
-                                    .layout(*ui.layout()),
-                                |ui| {
-                                    draw_harmonic_plot(
-                                        ui,
-                                        "Phase",
-                                        ChartType::Phase,
-                                        right_w,
-                                        chart_h,
-                                        &synth_compute_engine,
-                                    );
-                                },
-                            );
-                        });
-                        ui.add_space(10.0);
+                                ui.allocate_new_ui(
+                                    egui::UiBuilder::new()
+                                        .max_rect(right_rect)
+                                        .layout(*ui.layout()),
+                                    |ui| {
+                                        draw_harmonic_plot(
+                                            ui,
+                                            "Phase",
+                                            ChartType::Phase,
+                                            right_w,
+                                            chart_h,
+                                            &synth_compute_engine,
+                                        );
+                                    },
+                                );
+                            });
+                            ui.add_space(10.0);
 
-                        // ── Assembled sound ───────────────────────────────────────
-                        section(ui, "Assembled Sound", |ui| {
-                            draw_assembled_chart(
-                                ui,
-                                &synth_compute_engine,
-                                content_w,
-                                window_height,
-                            );
+                            // ── Assembled sound ───────────────────────────────────────
+                            section(ui, "Assembled Sound", |ui| {
+                                draw_assembled_chart(
+                                    ui,
+                                    &synth_compute_engine,
+                                    content_w,
+                                    window_height,
+                                );
+                            });
                         });
                 });
             },
