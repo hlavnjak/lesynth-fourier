@@ -69,6 +69,46 @@ impl GranularityLevel {
     pub fn as_f32(&self) -> f32 {
         self.as_f64() as f32
     }
+
+    /// Position in [`Self::VARIANTS`] — how a level is stored in the persisted
+    /// nested-Fourier state, which needs a plain byte rather than an enum whose
+    /// name could be renamed out from under an old file.
+    pub fn to_index(self) -> u8 {
+        Self::VARIANTS
+            .iter()
+            .position(|&v| v == self)
+            .unwrap_or(0) as u8
+    }
+
+    /// The level at `index`, or `None` when a file names one this build has no
+    /// variant for.
+    pub fn from_index(index: u8) -> Option<Self> {
+        Self::VARIANTS.get(index as usize).copied()
+    }
+}
+
+/// Selectable fundamentals (Hz) for a `NestedFourier` curve, `0.0` first for
+/// **auto** — one cycle of the fundamental across the whole grid, which is the
+/// only shape the series could make before this was selectable.
+///
+/// Hz here is measured against the grid's own duration
+/// (`SynthComputeEngine::grid_duration_secs`): a 4 Hz fundamental on a grid
+/// spanning 0.75 s turns three times across the chart. The list runs from well
+/// under one turn per grid up to a couple of hundred, which is where a chart of
+/// a few dozen buckets stops resolving the wave at all.
+pub const NESTED_BASE_FREQ_CHOICES: [f32; 16] = [
+    0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 50.0, 80.0, 120.0, 160.0, 200.0,
+];
+
+/// How a nested-Fourier base frequency reads in the combo box.
+pub fn nested_base_freq_label(hz: f32) -> String {
+    if hz <= 0.0 {
+        "Base: auto".to_string()
+    } else if hz < 1.0 {
+        format!("Base: {hz:.2} Hz")
+    } else {
+        format!("Base: {hz:.0} Hz")
+    }
 }
 
 impl Default for CurveType {

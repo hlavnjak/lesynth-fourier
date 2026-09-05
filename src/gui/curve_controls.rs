@@ -15,7 +15,10 @@
 use std::sync::Arc;
 use nih_plug::prelude::ParamSetter;
 use crate::engine::{ChartType, SynthComputeEngine};
-use crate::params::{CurveType, GranularityLevel, HarmonicParam};
+use crate::params::{
+    nested_base_freq_label, CurveType, GranularityLevel, HarmonicParam,
+    NESTED_BASE_FREQ_CHOICES,
+};
 
 fn style_slider(ui: &mut nih_plug_egui::egui::Ui) {
     use nih_plug_egui::egui::{Color32, Stroke};
@@ -81,15 +84,18 @@ pub fn draw_curve_controls(
         ),
     };
 
-    // 4 columns: offset slider | enabled checkbox | granularity combo | curve type combo
-    let col0_w = window_width * 0.48;
-    let col1_w = window_width * 0.14;
-    let col2_w = window_width * 0.20;
-    let col3_w = (window_width - col0_w - col1_w - col2_w).max(1.0);
+    // 5 columns: offset slider | enabled checkbox | granularity combo |
+    // curve type combo | nested-Fourier base frequency combo
+    let col0_w = window_width * 0.36;
+    let col1_w = window_width * 0.12;
+    let col2_w = window_width * 0.17;
+    let col3_w = window_width * 0.17;
+    let col4_w = (window_width - col0_w - col1_w - col2_w - col3_w).max(1.0);
 
     let x1 = col0_w;
     let x2 = col0_w + col1_w;
     let x3 = col0_w + col1_w + col2_w;
+    let x4 = col0_w + col1_w + col2_w + col3_w;
 
     let line_h = ui.spacing().interact_size.y;
     let vspace = ui.spacing().item_spacing.y;
@@ -282,5 +288,81 @@ pub fn draw_curve_controls(
                     }
                 }
             });
+    }
+
+    // ── Col 4: Nested-Fourier base frequency combo ────────────────────────────
+    //
+    // Only a Nested Fourier curve has a fundamental to set, so the box is drawn
+    // disabled for a Constant one rather than hidden: the row keeps its shape,
+    // and the control is where it will be when the type is switched back.
+    {
+        let mut col_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(make_rect(x4, col4_w))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+
+        style_other_controls(&mut col_ui);
+
+        let is_nested = curve.value() == CurveType::NestedFourier;
+        let grid_secs = synth_compute_engine.grid_duration_secs();
+        // The chosen frequency, and what it actually draws: Hz is measured
+        // against the grid's own duration, so the useful number to show is how
+        // many turns the fundamental makes across the chart. Both come off the
+        // series so the label cannot drift from what the engine fills.
+        let (current, cycles) = {
+            let state = harmonic.nested_fourier.read().unwrap();
+            let series = state.series(chart_type);
+            (series.base_freq_hz, series.cycles_across_grid(grid_secs))
+        };
+
+        col_ui.add_enabled_ui(is_nested, |col_ui| {
+            // The popup measures itself once per id and keeps that size for
+            // good, so the id carries the list length: a build with more choices
+            // must not inherit a box sized for fewer.
+            let combo_id = format!(
+                "{:?}_nf_base_freq_combo_{}_{}",
+                chart_type,
+                idx,
+                NESTED_BASE_FREQ_CHOICES.len()
+            );
+            let response = egui::ComboBox::from_id_salt(combo_id)
+                .width(col4_w - 8.0)
+                .height(420.0)
+                .selected_text(
+                    nih_plug_egui::egui::RichText::new(nested_base_freq_label(current))
+                        .color(nih_plug_egui::egui::Color32::WHITE),
+                )
+                .show_ui(col_ui, |ui| {
+                    style_other_controls(ui);
+                    for &hz in NESTED_BASE_FREQ_CHOICES.iter() {
+                        if ui
+                            .selectable_label(current == hz, nested_base_freq_label(hz))
+                            .clicked()
+                        {
+                            harmonic
+                                .nested_fourier
+                                .write()
+                                .unwrap()
+                                .series_mut(chart_type)
+                                .base_freq_hz = hz;
+                            synth_compute_engine.fill_nested_fourier_curve(idx, chart_type);
+                            params_changed_action();
+                        }
+                    }
+                });
+
+            response.response.on_hover_text(format!(
+                "Fundamental of this chart's nested-Fourier series.\n\
+                 The grid spans {grid_secs:.3} s, so this is {cycles:.2} cycle(s) \
+                 across the chart (sub-harmonic k makes k times that).\n\
+                 \"auto\" is exactly one cycle across the grid."
+            ));
+            col_ui.label(
+                nih_plug_egui::egui::RichText::new(format!("{cycles:.2} cyc/grid"))
+                    .strong()
+                    .color(nih_plug_egui::egui::Color32::WHITE),
+            );
+        });
     }
 }

@@ -43,6 +43,19 @@ pub const TWO_PI: f32 = 2.0 * PI;
 pub const SAMPLE_RATE: f64 = 44100.0;
 pub const NYQUIST_FREQUENCY: f64 = SAMPLE_RATE / 2.0;
 
+/// The key the editor previews the assembled chart at (A2). Also the pitch a
+/// hand-drawn Synth grid is measured against when it has no analysed duration
+/// of its own: in Synth mode a bucket is one period, so `num_buckets` of them
+/// only becomes a number of seconds once a pitch is named, and this is the one
+/// the chart on screen is drawn at.
+pub const PREVIEW_KEY: usize = 24;
+
+/// Fundamental frequency (Hz) of piano key `key` — A0 (key 0) is 27.5 Hz and
+/// every key above it is a semitone up.
+pub fn key_frequency(key: usize) -> f64 {
+    27.5 * 2f64.powf(key as f64 / 12.0)
+}
+
 /// Calculate the maximum usable harmonic number for a given piano key
 /// to prevent aliasing (harmonic frequency must be below Nyquist frequency)
 pub fn max_harmonic_for_key(key: usize) -> usize {

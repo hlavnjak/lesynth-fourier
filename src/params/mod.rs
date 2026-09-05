@@ -17,7 +17,9 @@ pub mod harmonic;
 pub mod nested_fourier;
 pub mod synth_params;
 
-pub use curve_type::{CurveType, GranularityLevel};
+pub use curve_type::{
+    nested_base_freq_label, CurveType, GranularityLevel, NESTED_BASE_FREQ_CHOICES,
+};
 pub use harmonic::HarmonicParam;
 pub use nested_fourier::{NestedFourierState, NUM_NESTED_FOURIER_HARMONICS};
 pub use synth_params::LeSynthParams;

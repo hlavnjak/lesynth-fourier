@@ -69,6 +69,15 @@ LeSynth features a modular architecture with clear separation of concerns:
   - **Constant curves**: Static values with optional Wobble sine modulation
   - **Sine curves**: Sinusoidal modulation with customizable amplitude and frequency, plus Wobble enhancement
   - **Wobble component**: Additional sine-based modulation that can be applied to both curve types for complex harmonic evolution
+  - **Nested Fourier curves**: 32 sub-harmonic amplitude/phase sliders summed
+    into the envelope, plus a **base frequency** selector that says how fast the
+    sub-harmonic fundamental runs. It is in Hz, measured against the grid's own
+    duration — an analysed track's source duration, or `num_buckets` periods of
+    the preview key (A2) for a hand-drawn grid — so a 5 Hz base on a grid
+    spanning 0.64 s turns 3.18 times across the chart. `auto` is exactly one
+    turn across the grid, which is the only shape the series could make before
+    the selector existed. Enabled only for the `Nested Fourier` curve type; the
+    box reports the resulting cycles-per-grid under it.
 - **GUI System**: Interactive interface with real-time plotting of time-varying harmonic curves
 - **Voice Management**: Polyphonic voice allocation with fade in/out
 

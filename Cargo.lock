@@ -915,6 +915,7 @@ dependencies = [
  "nih_plug_egui",
  "realfft",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

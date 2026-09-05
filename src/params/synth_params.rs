@@ -171,3 +171,39 @@ impl Default for LeSynthParams {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::ChartType;
+
+    /// The whole point of keeping the nested-Fourier sliders as `#[persist]`
+    /// state: they have to come back through the plugin's own save/load, which
+    /// is the only channel a host has for them. Without this a saved project
+    /// reloads its grid but every slider under it reads zero.
+    #[test]
+    fn the_nested_fourier_sliders_survive_the_plugins_own_state() {
+        let params = LeSynthParams::default();
+        {
+            let mut st = params.harmonics[3].nested_fourier.write().unwrap();
+            let series = st.series_mut(ChartType::Amp);
+            series.amps[5] = 0.42;
+            series.phases[5] = -1.25;
+            series.grans[5] = GranularityLevel::High.to_index();
+            series.base_freq_hz = 12.0;
+        }
+        let saved = params.serialize_fields();
+
+        let restored = LeSynthParams::default();
+        restored.deserialize_fields(&saved);
+        let st = restored.harmonics[3].nested_fourier.read().unwrap();
+        let series = st.series(ChartType::Amp);
+        assert_eq!(series.amps[5], 0.42);
+        assert_eq!(series.phases[5], -1.25);
+        assert_eq!(series.granularity(5), GranularityLevel::High);
+        assert_eq!(series.base_freq_hz, 12.0);
+        // And a harmonic nobody touched is still at its defaults.
+        let other = restored.harmonics[4].nested_fourier.read().unwrap();
+        assert_eq!(other.series(ChartType::Amp).base_freq_hz, 0.0);
+    }
+}

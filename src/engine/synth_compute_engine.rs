@@ -20,8 +20,8 @@ use std::time::Duration;
 use realfft::num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner};
 use crate::constants::{
-    max_harmonic_for_key, NUM_HARMONICS, NUM_KEYS, NUM_OF_BUCKETS_DEFAULT, TWO_PI,
-    VOICE_MIX_SCALING,
+    key_frequency, max_harmonic_for_key, NUM_HARMONICS, NUM_KEYS, NUM_OF_BUCKETS_DEFAULT,
+    PREVIEW_KEY, TWO_PI, VOICE_MIX_SCALING,
 };
 use crate::params::{CurveType, LeSynthParams};
 use super::{ChartType, ExecutionMode, SharedParams};
@@ -1611,6 +1611,32 @@ impl SynthComputeEngine {
         self.update_assembled_chart_with_key24();
     }
 
+    /// Wall-clock seconds the bucket grid spans — the reference a nested-Fourier
+    /// base frequency in Hz is measured against.
+    ///
+    /// An analysed track knows: it is the source subtrack's own duration. A
+    /// hand-drawn Synth grid does not, because there a bucket is one *period*
+    /// of whatever key is played, so `num_buckets` buckets are a different
+    /// number of seconds on every key. Naming one pitch is the only way that
+    /// grid becomes a duration at all, and the pitch named is
+    /// [`PREVIEW_KEY`] — the key the chart on screen is drawn at, so what the
+    /// user sets is what the user sees.
+    pub fn grid_duration_secs(&self) -> f64 {
+        let analysed = *self.shared_params.analysis_duration_secs.lock().unwrap() as f64;
+        if analysed > 0.0 {
+            return analysed;
+        }
+        let base = {
+            let f = *self.shared_params.analysis_base_freq.lock().unwrap() as f64;
+            if f > 0.0 {
+                f
+            } else {
+                key_frequency(PREVIEW_KEY)
+            }
+        };
+        (self.num_buckets() as f64 / base).max(f64::EPSILON)
+    }
+
     /// Write harmonic `n`'s nested-Fourier amplitude/phase row, without the
     /// normalize/dirty/chart side effects (see [`Self::write_constant_row`]).
     fn write_nested_fourier_row(&self, n: usize, chart_type: ChartType) {
@@ -1619,10 +1645,12 @@ impl SynthComputeEngine {
             ChartType::Amp => harmonic.curve_offset_amp.value() as f64,
             ChartType::Phase => harmonic.curve_offset_phase.value() as f64,
         };
-        let (sub_amps, sub_phases) = {
+        // Before the grid lock: this reads the bucket count itself.
+        let grid_secs = self.grid_duration_secs();
+        let (sub_amps, sub_phases, cycles) = {
             let state = harmonic.nested_fourier.read().unwrap();
             let series = state.series(chart_type);
-            (series.amps, series.phases)
+            (series.amps, series.phases, series.cycles_across_grid(grid_secs))
         };
 
         let mut data = match chart_type {
@@ -1632,11 +1660,16 @@ impl SynthComputeEngine {
         let num_buckets = data[n].len();
 
         for bucket in 0..num_buckets {
+            // `t` is the position across the grid; `cycles` is how many turns
+            // the fundamental makes over it, which is the base frequency in Hz
+            // times the grid's duration. Auto (no frequency chosen) is one turn,
+            // exactly what this drew before the frequency was selectable.
             let t = bucket as f64 / num_buckets as f64;
             let mut value = offset;
             for (k, (&amp, &phase)) in sub_amps.iter().zip(sub_phases.iter()).enumerate() {
                 value += amp as f64
-                    * (2.0 * std::f64::consts::PI * (k + 1) as f64 * t + phase as f64).sin();
+                    * (2.0 * std::f64::consts::PI * (k + 1) as f64 * cycles * t + phase as f64)
+                        .sin();
             }
             data[n][bucket] = match chart_type {
                 ChartType::Amp => value.clamp(0.0, 1.0) as f32,
@@ -2905,6 +2938,49 @@ mod tests {
             engine.shared_params.amplitude_data.lock().unwrap()[h],
             "enabling cust must override the row with the drawn curve"
         );
+    }
+
+    #[test]
+    fn the_nested_base_frequency_sets_the_cycles_across_the_grid() {
+        // A synth-mode engine: no analysis, so the grid's duration is
+        // `num_buckets` periods of the preview key.
+        let engine = create_test_engine();
+        let h = 2usize;
+        let expected_secs =
+            engine.num_buckets() as f64 / crate::constants::key_frequency(crate::constants::PREVIEW_KEY);
+        assert!((engine.grid_duration_secs() - expected_secs).abs() < 1e-9);
+
+        // A single sub-harmonic at a mid-scale offset, so the row is a clean
+        // sine whose zero crossings can simply be counted.
+        {
+            let mut st = engine.synth_params.harmonics[h].nested_fourier.write().unwrap();
+            let series = st.series_mut(ChartType::Phase);
+            series.amps[0] = 1.0;
+        }
+
+        // Auto: exactly one cycle across the grid, which is what this drew
+        // before the frequency was selectable.
+        engine.fill_nested_fourier_curve(h, ChartType::Phase);
+        let auto = engine.shared_params.phase_data.lock().unwrap()[h].clone();
+        assert_eq!(sign_changes(&auto), 1, "auto must be one cycle across the grid");
+
+        // Four turns across the grid, asked for in Hz against its duration.
+        let four_turns_hz = (4.0 / expected_secs) as f32;
+        {
+            let mut st = engine.synth_params.harmonics[h].nested_fourier.write().unwrap();
+            st.series_mut(ChartType::Phase).base_freq_hz = four_turns_hz;
+        }
+        engine.fill_nested_fourier_curve(h, ChartType::Phase);
+        let faster = engine.shared_params.phase_data.lock().unwrap()[h].clone();
+        assert_eq!(sign_changes(&faster), 7, "4 cycles cross zero 7 times over one grid");
+        assert_ne!(auto, faster, "the base frequency must reshape the row");
+    }
+
+    /// Zero crossings of a row — how many times a drawn sine turns over.
+    fn sign_changes(row: &[f32]) -> usize {
+        row.windows(2)
+            .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+            .count()
     }
 
     #[test]

@@ -27,20 +27,6 @@ fn gran_label(g: GranularityLevel) -> &'static str {
     }
 }
 
-/// Default granularity (amplitude-slider max) for a sub-harmonic by index:
-/// lower harmonics carry the most energy, so they get a coarser cap while the
-/// higher ones default progressively finer. First 8 → 0.5, next 20 → 0.1,
-/// the rest → 0.05.
-fn default_granularity(sub_idx: usize) -> GranularityLevel {
-    if sub_idx < 8 {
-        GranularityLevel::Medium
-    } else if sub_idx < 28 {
-        GranularityLevel::Low
-    } else {
-        GranularityLevel::VeryLow
-    }
-}
-
 pub fn draw_nested_fourier_controls(
     ui: &mut nih_plug_egui::egui::Ui,
     harmonic_idx: usize,
@@ -68,19 +54,20 @@ pub fn draw_nested_fourier_controls(
         for sub_idx in 0..NUM_NESTED_FOURIER_HARMONICS {
             let engine = synth_compute_engine.clone();
 
-            // Snapshot this sub-harmonic's current amp/phase for the frame.
-            let (cur_amp, cur_phase) = {
+            // Snapshot this sub-harmonic's current amp/phase/granularity for the
+            // frame. The granularity caps the amplitude slider's range, so it is
+            // part of the persisted series rather than egui's frame-local memory
+            // — a slider restored at 0.8 under a 0.05 cap shows a value it
+            // cannot reach, which is what keeping it out of the state cost.
+            let (cur_amp, cur_phase, mut gran) = {
                 let state = nf.read().unwrap();
                 let series = state.series(chart_type);
-                (series.amps[sub_idx], series.phases[sub_idx])
+                (
+                    series.amps[sub_idx],
+                    series.phases[sub_idx],
+                    series.granularity(sub_idx),
+                )
             };
-
-            // Per-slider granularity caps the amplitude slider's range. This is
-            // GUI-only state (kept in egui memory): it persists across frames but
-            // resets when the editor is reopened. The slider VALUE persists normally.
-            let gran_id = egui::Id::new(("nf_gran", chart_type, harmonic_idx, sub_idx));
-            let mut gran: GranularityLevel =
-                ui.data_mut(|d| d.get_temp(gran_id)).unwrap_or_else(|| default_granularity(sub_idx));
             let gran_max = gran.as_f64();
 
             ui.vertical(|ui| {
@@ -148,12 +135,13 @@ pub fn draw_nested_fourier_controls(
                                 .clicked()
                             {
                                 gran = variant;
-                                ui.data_mut(|d| d.insert_temp(gran_id, variant));
                                 // Clamp the stored value down if it now exceeds the new max.
                                 let new_max = variant.as_f64() as f32;
                                 let clamped = {
                                     let mut state = nf.write().unwrap();
-                                    let amp = &mut state.series_mut(chart_type).amps[sub_idx];
+                                    let series = state.series_mut(chart_type);
+                                    series.grans[sub_idx] = variant.to_index();
+                                    let amp = &mut series.amps[sub_idx];
                                     if *amp > new_max {
                                         *amp = new_max;
                                         true
@@ -163,8 +151,8 @@ pub fn draw_nested_fourier_controls(
                                 };
                                 if clamped {
                                     engine.fill_nested_fourier_curve(harmonic_idx, chart_type);
-                                    params_changed_action();
                                 }
+                                params_changed_action();
                             }
                         }
                     });
