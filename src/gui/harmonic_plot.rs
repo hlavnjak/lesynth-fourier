@@ -120,22 +120,23 @@ pub fn draw_harmonic_plot(
                 );
             }
 
-            // Pin the amplitude axis to exactly [0, amp_ymax] so the slider is a
-            // hard zoom. Derive the x-range from the bucket count (all curves
-            // share the same length) rather than the current plot bounds, so the
-            // x-axis keeps spanning the full number of buckets.
-            if is_amp {
-                let x_max = data
-                    .iter()
-                    .map(|d| d.len())
-                    .max()
-                    .unwrap_or(1)
-                    .saturating_sub(1)
-                    .max(1) as f64;
-                plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                    [0.0, 0.0],
-                    [x_max, amp_ymax as f64],
-                ));
-            }
+            // Pin both axes so the x-axis always spans the full bucket count,
+            // even when every curve is skipped (all-zero or disabled) and
+            // egui_plot has no data to auto-fit to. Derive the x-range from
+            // the bucket count (all curves share the same length) rather than
+            // the current plot bounds. The amplitude y-axis is a hard zoom to
+            // [0, amp_ymax]; the phase y-axis is [0, 2π].
+            let x_max = data
+                .iter()
+                .map(|d| d.len())
+                .max()
+                .unwrap_or(1)
+                .saturating_sub(1)
+                .max(1) as f64;
+            let y_max = if is_amp { amp_ymax as f64 } else { TWO_PI as f64 };
+            plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                [0.0, 0.0],
+                [x_max, y_max],
+            ));
         });
 }
