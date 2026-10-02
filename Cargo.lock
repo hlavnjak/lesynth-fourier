@@ -167,7 +167,7 @@ dependencies = [
 [[package]]
 name = "baseview"
 version = "0.1.0"
-source = "git+https://github.com/hlavnjak/baseview?branch=reactive-idle-wait#309b1387b722310ddf34e90ee70d4319a5916060"
+source = "git+https://github.com/hlavnjak/baseview?branch=reactive-idle-wait#93f9c719e81fef59a9af25f2a3887156ecfa54eb"
 dependencies = [
  "cocoa",
  "core-foundation",
