@@ -377,7 +377,7 @@ impl Plugin for LeSynth {
                         // Every section below is sized off the window, so on a host
                         // window shorter than the editor wants, the lower cards would
                         // simply be cut off. Scroll the whole screen vertically, the
-                        // way the Gemstone DAW host scrolls its own panel. The
+                        // way the ReSynth Studio host scrolls its own panel. The
                         // background stays outside it, painted across the window.
                         egui::ScrollArea::vertical()
                             .id_salt("editor_screen")

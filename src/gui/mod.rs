@@ -41,7 +41,7 @@ pub fn harmonic_color(n: usize) -> egui::Color32 {
 }
 
 /// Consistent bordered "section card" used to separate the top-level areas of
-/// the editor, mirroring the framed sections in the Gemstone DAW host UI: a
+/// the editor, mirroring the framed sections in the ReSynth Studio host UI: a
 /// rounded, bordered, dark-translucent card with an accent heading and a
 /// separator. `add_contents` receives the inner `Ui` and its result is
 /// returned.

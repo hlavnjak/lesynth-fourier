@@ -491,7 +491,7 @@ fn render_psola(
     // (`PlaybackGrid::ramp`). All the fade does now is average each period with
     // its neighbour, and a voice's periods genuinely differ — the largest error
     // left. Against the render the method is trying to produce
-    // (gemstone-daw's `tools/psolaref.py`), on my_voice: -37.6 dB at 0.15,
+    // (resynth-studio's `tools/psolaref.py`), on my_voice: -37.6 dB at 0.15,
     // -48.4 at 0.05, -64.2 at zero; and against a true resampling, -36.9 vs
     // -42.8, with the 4-6 kHz residual going -8.8 -> -23.0 dB. The old 0.15 was
     // measured when the joins really did not join.
