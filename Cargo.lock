@@ -167,7 +167,7 @@ dependencies = [
 [[package]]
 name = "baseview"
 version = "0.1.0"
-source = "git+https://github.com/hlavnjak/baseview?branch=reactive-idle-wait#93f9c719e81fef59a9af25f2a3887156ecfa54eb"
+source = "git+https://github.com/hlavnjak/baseview?branch=reactive-idle-wait#13cd58afcb7981bfa96cd0f369360ed08aeff9e0"
 dependencies = [
  "cocoa",
  "core-foundation",
@@ -547,7 +547,7 @@ dependencies = [
 [[package]]
 name = "egui-baseview"
 version = "0.5.0"
-source = "git+https://github.com/hlavnjak/egui-baseview?branch=reactive-idle-wait#9e6f6f0534ba1185ab944c73b2114296bfecf34c"
+source = "git+https://github.com/hlavnjak/egui-baseview?branch=reactive-idle-wait#4fd091157714bb1d9ae610e8abfbf7a84e9ae800"
 dependencies = [
  "baseview",
  "copypasta",
