@@ -1,0 +1,21 @@
+Third-party software in LeSynth Fourier
+========================================================================
+
+LeSynth Fourier is Copyright 2026 Jakub Hlavnicka and licensed under the
+Apache License 2.0 (see LICENSE).
+
+It is built from the following open-source Rust crates, each under its own
+licence, reproduced below. One point needs attention:
+
+* GPLv3: the plugin exports its VST3 interface through vst3-sys, which is
+  licensed under the GNU GPL version 3. The plugin binary (VST3 and CLAP alike,
+  as they are the same binary) is therefore distributed under the terms of the
+  GPLv3 (the Apache-2.0 code in it is GPLv3-compatible). Its complete
+  corresponding source code is public:
+    https://github.com/hlavnjak/lesynth-fourier
+    https://github.com/hlavnjak/nih-plug (branch reduce_egui_high_cpu_consumption)
+    https://github.com/hlavnjak/baseview (branch reactive-idle-wait)
+    https://github.com/hlavnjak/egui-baseview (branch reactive-idle-wait)
+    https://github.com/robbert-vdh/vst3-sys (branch fix/drop-box-from-raw)
+  with the exact revisions pinned in lesynth-fourier's Cargo.lock.
+

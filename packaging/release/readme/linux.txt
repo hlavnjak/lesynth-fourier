@@ -1,0 +1,8 @@
+Installing it (Linux, x86_64)
+-----------------------------
+Copy @PLUGIN@ into @DIR@ (for your user) and rescan
+plugins in your DAW.
+
+Needs glibc 2.31 or newer (Ubuntu 20.04, Debian 11, Fedora 32 and later) and
+OpenGL; the editor runs under X11 (XWayland on a Wayland desktop).
+

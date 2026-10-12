@@ -1,0 +1,6 @@
+Installing it (Windows 10/11, 64-bit)
+-------------------------------------
+Copy @PLUGIN@ into @DIR@ and rescan plugins in your DAW.
+
+The plugin is not code-signed yet; DAWs load it regardless.
+

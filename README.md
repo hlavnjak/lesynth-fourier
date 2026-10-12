@@ -43,6 +43,13 @@ cargo build --release
 
 The debug build includes comprehensive logging to both stdout and a log file (`lesynth.log` in the system temp directory), while the release build is optimized for performance with no logging overhead.
 
+### Release Packages
+```bash
+make release   # releases/<version>/lesynth_fourier-v<version>-{vst3,clap}-{linux,win,macos}.zip + SHA256SUMS
+```
+
+Cross-builds Windows (mingw) and macOS (universal, via zig and `cargo zigbuild`) from Linux, links the Linux binary against glibc 2.31 so it loads on older distributions, and signs and notarises the macOS bundles on a Mac over ssh (`packaging/macos/sign.env`, not committed; see `tools/macos-sign.sh`).
+
 ## Technology Stack
 
 - **Language**: Rust

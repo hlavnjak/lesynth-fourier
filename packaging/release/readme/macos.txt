@@ -1,0 +1,8 @@
+Installing it (macOS 10.13 or newer, Intel and Apple silicon)
+-------------------------------------------------------------
+Copy @PLUGIN@ into @DIR@ (for all users, or the same
+folder under ~/Library for your user only) and rescan plugins in your DAW.
+
+The plugin is a universal binary, signed with a Developer ID and notarised by
+Apple, so it loads without a Gatekeeper warning.
+

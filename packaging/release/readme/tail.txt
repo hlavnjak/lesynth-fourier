@@ -1,0 +1,9 @@
+Licence
+-------
+LeSynth Fourier is licensed under the Apache License 2.0 (LICENSE).
+THIRD-PARTY-LICENSES.txt lists the open-source components it is built from and
+their licences. Note that the plugin binary is distributed under the GPLv3
+because of its VST3 bindings; see that file for details and for where its
+source code is.
+
+It comes with no warranty.

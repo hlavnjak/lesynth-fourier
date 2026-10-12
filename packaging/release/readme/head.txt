@@ -1,0 +1,9 @@
+LeSynth Fourier @VERSION@ (@FORMAT@)
+============================
+
+A Fourier (additive) synthesizer plugin: every harmonic has its own amplitude
+and phase curves over time, and a recording can be analysed into an editable
+harmonic grid. The version is shown at the top right of the plugin's window.
+
+Source, issues and documentation: https://github.com/hlavnjak/lesynth-fourier
+

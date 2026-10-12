@@ -1,1 +1,11 @@
 /target
+
+# Release zips (`make release`) and the old bundle scripts' output.
+/releases
+/dist
+
+# macOS signing: the filled-in settings and any key material — never commit.
+/packaging/macos/sign.env
+*.p8
+*.p12
+*.cer

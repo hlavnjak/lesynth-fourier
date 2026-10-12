@@ -62,7 +62,7 @@ impl Plugin for LeSynth {
     const VENDOR: &'static str = "Jakub Hlavnicka";
     const URL: &'static str = "https://donothaveany.com";
     const EMAIL: &'static str = "hlavnickajakub@gmail.com";
-    const VERSION: &'static str = "1.2.0";
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
     const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
@@ -395,7 +395,19 @@ impl Plugin for LeSynth {
 
                             // ── Execution-mode switch ─────────────────────────────────
                             let mut mode = synth_compute_engine.shared_params.execution_mode();
-                            section(ui, "Mode", |ui| {
+                            // The plugin's version, at the right end of the first
+                            // section's caption row, so a user can tell which build
+                            // a host loaded.
+                            let version_header = |ui: &mut egui::Ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("LeSynth Fourier v{}", Self::VERSION))
+                                            .size(12.0)
+                                            .color(egui::Color32::from_gray(160)),
+                                    );
+                                });
+                            };
+                            section_with_header(ui, "Mode", version_header, |ui| {
                                 ui.horizontal(|ui| {
                                     if ui
                                         .selectable_label(mode == ExecutionMode::Synth, "Synth")
