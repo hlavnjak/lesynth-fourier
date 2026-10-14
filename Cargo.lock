@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "lesynth_fourier"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "chrono",
  "egui_plot",
