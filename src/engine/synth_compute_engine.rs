@@ -1412,6 +1412,16 @@ pub struct SynthComputeEngine {
     /// It decides which way the editor syncs the Buckets slider and the grid:
     /// see [`Self::grid_is_loaded`].
     grid_is_loaded: AtomicBool,
+    /// Tells the compute thread to return; set by `Drop`.
+    compute_stop: Arc<AtomicBool>,
+    /// The compute thread, joined by `Drop`. It must be gone before the instance
+    /// is: on Windows the host's `FreeLibrary` unmaps this library once the last
+    /// instance is released, and a thread still sleeping in it wakes up into
+    /// unmapped code and takes the host down — closing the editor or stopping
+    /// playback in ReSynth Studio did exactly that. (On Linux and macOS a Rust
+    /// library is never really unloaded, so there it only leaked a thread and a
+    /// grid per instance.)
+    compute_thread: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl SynthComputeEngine {
@@ -1423,10 +1433,13 @@ impl SynthComputeEngine {
             pending_analysis: Mutex::new(None),
             editor_ctx: Mutex::new(None),
             grid_is_loaded: AtomicBool::new(false),
+            compute_stop: Arc::new(AtomicBool::new(false)),
+            compute_thread: Mutex::new(None),
         };
 
         // Start background computation thread
-        engine.start_async_computation_thread();
+        let handle = engine.start_async_computation_thread();
+        *engine.compute_thread.lock().unwrap() = Some(handle);
 
         engine
     }
@@ -2064,11 +2077,12 @@ impl SynthComputeEngine {
     }
     
     /// Start the background thread that continuously computes dirty buffers
-    fn start_async_computation_thread(&self) {
+    fn start_async_computation_thread(&self) -> thread::JoinHandle<()> {
         let shared_params = self.shared_params.clone();
-        
+        let stop = self.compute_stop.clone();
+
         thread::spawn(move || {
-            loop {
+            while !stop.load(Ordering::Relaxed) {
                 // Check if we need to cancel and reset
                 if shared_params.computation_cancel.load(Ordering::Relaxed) {
                     shared_params.computation_cancel.store(false, Ordering::Relaxed);
@@ -2130,11 +2144,12 @@ impl SynthComputeEngine {
                         log::trace!("Cancelled async computation for key {}", key);
                     }
                 } else {
-                    // No dirty buffers, sleep a bit
-                    thread::sleep(Duration::from_millis(50));
+                    // No dirty buffers, sleep a bit. Parked rather than slept, so
+                    // `Drop` can wake it instead of waiting the interval out.
+                    thread::park_timeout(Duration::from_millis(50));
                 }
             }
-        });
+        })
     }
     
     /// Static version of assemble_buffer_for_key for use in background thread
@@ -2525,6 +2540,23 @@ impl SynthComputeEngine {
         // param says. From here the editor moves the slider to the grid instead
         // of the other way round.
         self.grid_is_loaded.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for SynthComputeEngine {
+    fn drop(&mut self) {
+        // Stop the compute thread and wait for it, so nothing of this instance is
+        // still running when the host unloads the library. The cancel flag cuts a
+        // render in progress short and the unpark ends an idle wait, so a host
+        // dropping a dozen instances at once (the Composer's Stop) does not wait
+        // out a dozen sleeps.
+        self.compute_stop.store(true, Ordering::Relaxed);
+        self.shared_params.computation_cancel.store(true, Ordering::Relaxed);
+        let handle = self.compute_thread.get_mut().ok().and_then(Option::take);
+        if let Some(handle) = handle {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
     }
 }
 
