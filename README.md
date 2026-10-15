@@ -2,6 +2,8 @@
 
 A Fourier (additive) synthesizer plugin for VST3 and CLAP, built in Rust using the nih-plug framework. LeSynth - Fourier generates harmonic sounds through Fourier synthesis with customizable amplitude and phase curves for each harmonic. It can also turn a real recording into an editable harmonic grid. Version 1.4.0 runs on Linux, Windows and macOS.
 
+LeSynth - Fourier and [ReSynth Studio](https://github.com/hlavnjak/resynth-studio) are companion projects: ReSynth Studio ([github.com/hlavnjak/resynth-studio](https://github.com/hlavnjak/resynth-studio)) is the Rust DAW that embeds LeSynth and feeds it recordings for resynthesis, and LeSynth is the plugin that does the analysis and synthesis.
+
 <p align="center">
   <img src="assets/1.3.0_synth_mode.png" alt="LeSynth - Fourier in Synth mode" width="49%">
   <img src="assets/1.3.0_analysis_mode.png" alt="LeSynth - Fourier in Analysis mode" width="49%">
