@@ -126,7 +126,9 @@ fn key_timing(
     if base_freq <= 0.0 || analysis_rate <= 0.0 || out_rate <= 0.0 {
         return None;
     }
-    let nominal = analysis_rate / base_freq;
+    // The source's nominal period as the pitch track named it, put right by
+    // what the source measured — see [`PlaybackGrid::pitch_correction`].
+    let nominal = analysis_rate / base_freq * grid.pitch_correction;
     if !(nominal >= 2.0) {
         return None;
     }
@@ -321,6 +323,15 @@ fn render_key_buffer(
         // holds fitted noise, and rendering noise periodically makes it a tone.
         .min(timing.map(|t| t.usable_harmonics).unwrap_or(usize::MAX));
 
+    // How the periods join, and — with part of the spectrum switched off — the
+    // harmonics to sum in place of the grid's. See [`Joins`].
+    let joins = timing.map(|t| Joins::new(ampl, phase, ampl_enabled, phase_enabled, max_h, t));
+    let own = joins.as_ref().filter(|j| !j.whole).map(|j| j.true_harmonics(ampl, phase, max_h));
+    let (ampl, phase): (&[Vec<f32>], &[Vec<f32>]) = match &own {
+        Some((a, p)) => (a, p),
+        None => (ampl, phase),
+    };
+
     // Which renderer. At the source's own pitch the accumulator below *is* the
     // exact inverse — nothing spliced, nothing to improve, and a measurable
     // amount to lose (steady tone -60 vs PSOLA's -52.7 dB; with vibrato -53.4 vs
@@ -342,18 +353,20 @@ fn render_key_buffer(
     // where nothing is transposed and the output should be the source back again
     // — the probe for what the grain pipeline loses on its own.
     let unity = unity && std::env::var_os("LESYNTH_FORCE_PSOLA").is_none();
-    if let Some(t) = timing.filter(|_| !unity && !forced_off) {
+    if let Some((t, joins)) = timing.zip(joins.as_ref()).filter(|_| !unity && !forced_off) {
         return render_psola(
             ampl,
             phase,
             ampl_enabled,
             phase_enabled,
             t,
+            joins,
             max_h,
             target_samples,
             cancel,
         );
     }
+
 
     loop {
         if drive_by_time && sound.len() >= target_samples {
@@ -390,13 +403,15 @@ fn render_key_buffer(
                 Some(t) => t.periods[b].max(2.0),
                 None => bucket_period(base_period, ratios, b),
             };
-            // The bucket's own mean. Dropping it puts a step at every bucket
-            // boundary — 41 dB of the exact inverse's fidelity, and a step at the
-            // bucket rate is heard as buzz, not as a level error.
-            dc = timing.and_then(|t| t.dc.get(b).copied()).unwrap_or(0.0);
-            // The grid's harmonics have the bucket's wrap ramp taken out of
-            // them, so it is added back below — see [`PlaybackGrid::ramp`].
-            ramp = timing.and_then(|t| t.ramp.get(b).copied()).unwrap_or(0.0);
+            // The bucket's own mean, and the line that closes its period onto
+            // the next. Dropping the mean puts a step at every bucket boundary
+            // (41 dB of the exact inverse's fidelity, heard as buzz, not as a
+            // level error); the line is [`PlaybackGrid::ramp`], as [`Joins`]
+            // hands it out.
+            (dc, ramp) = match &joins {
+                Some(j) => j.grain(b.checked_sub(1), b, (b + 1 < num_buckets).then_some(b + 1)),
+                None => (0.0, 0.0),
+            };
         }
 
         if let Some(c) = cancel {
@@ -429,6 +444,133 @@ fn render_key_buffer(
     sound
 }
 
+/// How consecutive periods of a render are made to **join**.
+///
+/// A bucket's stored harmonics are those of its cut with a straight line taken
+/// out ([`PlaybackGrid::ramp`]), so on their own they are a closed loop and the
+/// renderer adds a line back: `sample + offset + ramp · x`. [`Joins::grain`]
+/// says which line, and there are two answers.
+///
+/// **Everything on** — the line is the one that was taken out, stretched to end
+/// wherever the *next grain* starts. That reproduces the material exactly. The
+/// start values are read off the harmonics this render actually sums, so a high
+/// key's anti-alias cap moves them consistently.
+///
+/// **Harmonics switched off, or phases zeroed** — that line is wrong, and
+/// loudly. It bridges the start values of the *whole* waveform, and those are
+/// set mostly by the top of the spectrum: the breath and flutter that differ
+/// from one period to the next. Take that band out and the line still carries
+/// its period-to-period jumps into the render, as a step per period (a
+/// broadband buzz at the note's pitch) and as a random wobble on the harmonics
+/// that are left. It is at its most audible exactly where it should be
+/// impossible, on a note reduced to its first few harmonics with nothing to
+/// mask it: −29 dB above the fifth harmonic of a five-harmonic voice.
+///
+/// So with anything off, nothing of the whole waveform's line survives. Each
+/// grain is the cut's **own** harmonics ([`Joins::true_harmonics`] puts back
+/// the line's share of each) around the cut's own mean, and a line only takes
+/// up the small gap that leaves between neighbours: every boundary sits midway
+/// between the two grains that meet there.
+struct Joins {
+    /// Per bucket: the enabled harmonics' sum at phase zero.
+    start: Vec<f32>,
+    /// Per bucket: the stored mean (of the cut with its line taken out).
+    dc: Vec<f32>,
+    /// Per bucket: the stored line, [`PlaybackGrid::ramp`].
+    ramp: Vec<f32>,
+    /// Every harmonic in the rendered band has its amplitude and phase on.
+    whole: bool,
+}
+
+impl Joins {
+    fn new(
+        ampl: &[Vec<f32>],
+        phase: &[Vec<f32>],
+        ampl_enabled: &[bool],
+        phase_enabled: &[bool],
+        max_h: usize,
+        timing: &BucketTiming,
+    ) -> Self {
+        let nb = timing.periods.len();
+        let top = max_h.min(ampl.len());
+        let whole = (0..top).all(|n| ampl_enabled[n] && phase_enabled[n]);
+        let start = (0..nb)
+            .map(|b| {
+                let mut acc = 0.0f64;
+                for n in 0..top {
+                    // A phase switched off is rendered as zero: `sin(0)` adds nothing.
+                    if ampl_enabled[n] && phase_enabled[n] {
+                        acc += ampl[n][b] as f64 * (phase[n][b] as f64).sin();
+                    }
+                }
+                acc as f32
+            })
+            .collect();
+        let per_bucket = |v: &[f32]| (0..nb).map(|b| v.get(b).copied().unwrap_or(0.0)).collect();
+        Self { start, dc: per_bucket(timing.dc), ramp: per_bucket(timing.ramp), whole }
+    }
+
+    /// The grid's first `max_h` harmonics with the stored line's share put back:
+    /// the harmonics of each cut as it was, which is what a render of *part* of
+    /// the spectrum has to sum.
+    ///
+    /// Taking the line `r·x` out of a cut takes `−r/(πk)·sin(2πkx)` out of its
+    /// every harmonic `k`. Rendering the whole spectrum returns all of it with
+    /// the line. Rendering three harmonics without the line returns none of it —
+    /// and `r` is the top band's flutter, so its absence is that flutter written
+    /// into the harmonics left on: −18 dB of error on a source whose low three
+    /// harmonics are steady, against −40 with it put back.
+    fn true_harmonics(
+        &self,
+        ampl: &[Vec<f32>],
+        phase: &[Vec<f32>],
+        max_h: usize,
+    ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let nb = self.start.len();
+        let top = max_h.min(ampl.len());
+        let mut out_amp = Vec::with_capacity(top);
+        let mut out_phase = Vec::with_capacity(top);
+        for n in 0..top {
+            let share = 1.0 / (std::f32::consts::PI * (n as f32 + 1.0));
+            let (mut a_row, mut p_row) = (Vec::with_capacity(nb), Vec::with_capacity(nb));
+            for b in 0..nb {
+                // `A·sin(θ + φ)` as `sin θ · A cos φ + cos θ · A sin φ`; the
+                // line's share is all on the sine.
+                let (a, ph) = (ampl[n][b], phase[n][b]);
+                let on_sin = a * ph.cos() - self.ramp[b] * share;
+                let on_cos = a * ph.sin();
+                a_row.push(on_sin.hypot(on_cos));
+                p_row.push(on_cos.atan2(on_sin));
+            }
+            out_amp.push(a_row);
+            out_phase.push(p_row);
+        }
+        (out_amp, out_phase)
+    }
+
+    /// `(offset, ramp)` for a grain of bucket `b` played after a grain of `prev`
+    /// and before one of `next` (`None` at the ends of the note): the grain is
+    /// `sample + offset + ramp · x`, `x` running 0 to 1 across it.
+    fn grain(&self, prev: Option<usize>, b: usize, next: Option<usize>) -> (f32, f32) {
+        if self.whole {
+            let at = |i: usize| self.start[i] + self.dc[i];
+            // A repeat gets no ramp (a closed loop, which is what repeating a
+            // period means); a skip gets the ramp across everything it skipped.
+            let ramp = match next {
+                Some(n) => at(n) - at(b),
+                None => self.ramp[b],
+            };
+            return (self.dc[b], ramp);
+        }
+        // The grain's level: the cut's own mean (the stored one has half the
+        // line taken out with it) plus where its harmonics start.
+        let level = |i: usize| self.dc[i] + 0.5 * self.ramp[i] + self.start[i];
+        let from = prev.map_or(level(b), |p| 0.5 * (level(p) + level(b)));
+        let to = next.map_or(level(b), |n| 0.5 * (level(b) + level(n)));
+        (from - self.start[b], to - from)
+    }
+}
+
 /// Synthesise a key by **pitch-synchronous overlap-add**: one grain per output
 /// period, each read from a single bucket and laid on the boundary it came from.
 ///
@@ -454,6 +596,7 @@ fn render_psola(
     ampl_enabled: &[bool],
     phase_enabled: &[bool],
     timing: &BucketTiming,
+    joins: &Joins,
     max_h: usize,
     target_samples: usize,
     cancel: Option<&std::sync::atomic::AtomicBool>,
@@ -518,17 +661,8 @@ fn render_psola(
         }
     };
 
-    // Where each bucket's waveform starts, relative to the first: the running sum
-    // of the wrap ramps, since `ramp[b]` is `h(b+1)(0) - h(b)(0)`. A grain's ramp
-    // is then the gap to wherever the *next* grain starts — what makes a splice
-    // join.
-    let mut origin = Vec::with_capacity(nb + 1);
-    let mut acc_ramp = 0.0f32;
-    origin.push(0.0f32);
-    for b in 0..nb {
-        acc_ramp += timing.ramp.get(b).copied().unwrap_or(0.0);
-        origin.push(acc_ramp);
-    }
+    // `joins` is what makes consecutive grains join, splices included.
+    let mut prev_b: Option<usize> = None;
 
     let mut cache = CycleCache::default();
     let mut tau = 0.0f64; // the current epoch, in output samples
@@ -549,7 +683,6 @@ fn render_psola(
         }
 
         let p = (timing.periods[b] as f64).max(2.0);
-        let dc = timing.dc.get(b).copied().unwrap_or(0.0);
         // The ramp bridges this grain's start value to the **next grain's** —
         // the bucket after this one only while the key plays the source's
         // periods in order. Where the key's period made the renderer skip a
@@ -561,7 +694,8 @@ fn render_psola(
         // no ramp (a closed loop, which is what repeating a period means), a
         // skip gets the ramp across everything it skipped.
         let next_b = bucket_at(tau + p, epoch + 1).unwrap_or((b + 1).min(nb - 1));
-        let ramp = origin[next_b.min(nb)] - origin[b];
+        let (dc, ramp) = joins.grain(prev_b, b, Some(next_b));
+        prev_b = Some(b);
 
         // The grain spans one period either side of its epoch. `x` is the
         // position within it in cycles, zero at the epoch, ±1 at the edges,
@@ -924,6 +1058,15 @@ pub struct PlaybackGrid {
     /// zero — the period boundary. PSOLA needs exactly that, to lay each grain
     /// on the boundary it came from.
     pub rotations: Vec<f32>,
+    /// How much longer the source's nominal period really is than the pitch
+    /// track's `base_freq` says: the median of measured over tracked, bucket by
+    /// bucket. Exactly `1.0` for a track the measurement confirms.
+    ///
+    /// `base_freq` is the transposition reference — a key plays the source
+    /// slowed or sped by `key / base_freq`. With the periods now measured, a
+    /// reference still taken from a track that read 3% sharp would put every
+    /// key 3% (half a semitone) flat.
+    pub pitch_correction: f32,
     /// What [`normalize_grid_per_bucket`] divided this grid by. A key does not
     /// care, but a caller reproducing the source's level must multiply it back in
     /// — and it is not the analysis grid's divisor; the two grids differ.
@@ -953,6 +1096,145 @@ fn true_periods(lengths: &[usize], ratios: &[f32]) -> Vec<f32> {
     shape.iter().map(|s| (s * scale).max(2.0)).collect()
 }
 
+/// Normalised cross-correlation of `source[at..at + len]` with the same span
+/// `lag` samples later, `lag` fractional (the later span is read with the sinc).
+/// `None` when the spans do not fit or carry no energy.
+fn lag_correlation(source: &[f32], kernel: &[f64], at: usize, len: usize, lag: f64) -> Option<f64> {
+    if len == 0 || (at + len) as f64 + lag + 1.0 > source.len() as f64 {
+        return None;
+    }
+    let (mut ab, mut aa, mut bb) = (0.0f64, 0.0f64, 0.0f64);
+    let whole = lag.fract() == 0.0;
+    for i in at..at + len {
+        let a = source[i] as f64;
+        let b = if whole {
+            source[i + lag as usize] as f64
+        } else {
+            sinc_read(source, kernel, i as f64 + lag) as f64
+        };
+        ab += a * b;
+        aa += a * a;
+        bb += b * b;
+    }
+    let denom = (aa * bb).sqrt();
+    (denom > 1e-12).then(|| ab / denom)
+}
+
+/// The period each bucket **really** has, measured on the reconstruction.
+///
+/// `contour` (from [`true_periods`]) is the host's pitch track, and a key can
+/// only be as clean as that track is right: a bucket cut a few percent short of
+/// a period is an *incomplete* cycle. In order, at the source's own pitch, the
+/// cuts still tile and nothing is heard; on any other key the renderer repeats
+/// or skips them, and every splice then jumps each harmonic `k` by `k` times the
+/// missing fraction of a cycle — harmonic 10 by a third of a turn for a 3%
+/// error. That is a fuzz on every key but the source's own. A real voice track
+/// measured 411 samples where the period was 424, for half the note.
+///
+/// So the contour is only where to look: within ±12% of it, take the lag at
+/// which two periods of the source best match the two that follow, refined
+/// between samples. Buckets too weakly periodic to measure take their
+/// neighbours' correction, and the periods are smoothed (median of five, then
+/// a three-point mean) — a period estimate jitters, and jitter in the period is
+/// jitter in where every later bucket is cut. Where the two agree the contour
+/// stands.
+fn measured_periods(source: &[f32], kernel: &[f64], lengths: &[usize], contour: &[f32]) -> Vec<f32> {
+    let nb = contour.len();
+    let mut correction: Vec<Option<f32>> = Vec::with_capacity(nb);
+    let mut start = 0usize;
+    for b in 0..nb {
+        let guess = contour[b] as f64;
+        let centre = start + lengths[b] / 2;
+        start += lengths[b];
+        // Two periods, centred on the bucket where they fit.
+        let len = (2.0 * guess).round() as usize;
+        let lo = (guess * 0.88).floor().max(2.0) as usize;
+        let hi = (guess * 1.12).ceil() as usize;
+        let at = centre
+            .saturating_sub(len / 2)
+            .min(source.len().saturating_sub(len + hi + 2));
+        let mut best: Option<(usize, f64)> = None;
+        for lag in lo..=hi {
+            if let Some(c) = lag_correlation(source, kernel, at, len, lag as f64) {
+                if best.map_or(true, |(_, v)| c > v) {
+                    best = Some((lag, c));
+                }
+            }
+        }
+        // An edge of the search range is not a peak, and a weak peak is not a
+        // period (onsets, releases, breath).
+        let Some((lag, peak)) = best.filter(|&(l, c)| c >= 0.7 && l > lo && l < hi) else {
+            correction.push(None);
+            continue;
+        };
+        // Between the samples: a parabola through three points, on a bracket
+        // narrowed each time until the parabola is true.
+        let mut at_lag = lag as f64;
+        let mut value = peak;
+        for half in [1.0f64, 0.25, 0.0625] {
+            let l = lag_correlation(source, kernel, at, len, at_lag - half);
+            let r = lag_correlation(source, kernel, at, len, at_lag + half);
+            let (Some(l), Some(r)) = (l, r) else { break };
+            let curve = l - 2.0 * value + r;
+            if curve >= -1e-12 {
+                break;
+            }
+            at_lag += (0.5 * (l - r) / curve).clamp(-1.0, 1.0) * half;
+            match lag_correlation(source, kernel, at, len, at_lag) {
+                Some(v) => value = v,
+                None => break,
+            }
+        }
+        correction.push(Some((at_lag / guess) as f32));
+    }
+
+    // Unmeasurable buckets take the nearest measured one's correction.
+    let known: Vec<(usize, f32)> =
+        correction.iter().enumerate().filter_map(|(b, c)| c.map(|c| (b, c))).collect();
+    if known.is_empty() {
+        return contour.to_vec();
+    }
+    // Smoothed as periods, not as corrections: a contour that is wrong is not
+    // wrong smoothly, and smoothing the ratio would keep its every bump.
+    let filled: Vec<f32> = (0..nb)
+        .map(|b| {
+            let c = known
+                .iter()
+                .min_by_key(|(k, _)| k.abs_diff(b))
+                .map(|&(_, c)| c)
+                .unwrap_or(1.0);
+            c * contour[b]
+        })
+        .collect();
+    let at = |i: isize| filled[i.clamp(0, nb as isize - 1) as usize];
+    let median: Vec<f32> = (0..nb as isize)
+        .map(|b| {
+            let mut w = [at(b - 2), at(b - 1), at(b), at(b + 1), at(b + 2)];
+            w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            w[2]
+        })
+        .collect();
+    let m = |i: isize| median[i.clamp(0, nb as isize - 1) as usize];
+    (0..nb as isize)
+        .map(|b| {
+            let off = (m(b - 1) + m(b) + m(b + 1)) / (3.0 * contour[b as usize]) - 1.0;
+            // A contour the measurement confirms is the better of the two: its
+            // lengths tile the source, so it is right on average to far less
+            // than this estimate jitters by (a steady tone holds one period to
+            // 1e-5 from the contour and to 1e-3 from the measurement, which is
+            // 40 dB of a transposed key's fidelity). The measurement is for a
+            // contour that is *wrong*, so it comes in only as the disagreement
+            // outgrows what its own noise explains: none below `CONFIRMED`, all
+            // of it above `REFUTED`.
+            const CONFIRMED: f32 = 0.002;
+            const REFUTED: f32 = 0.004;
+            let x = ((off.abs() - CONFIRMED) / (REFUTED - CONFIRMED)).clamp(0.0, 1.0);
+            let trust = x * x * (3.0 - 2.0 * x);
+            (contour[b as usize] * (1.0 + trust * off)).max(2.0)
+        })
+        .collect()
+}
+
 /// Build the [`PlaybackGrid`] for an analysed grid, or `None` when the analysis
 /// did not record what it takes (a hand-drawn grid, or a `.lsft` from before
 /// version 3) — the caller then transposes from the stored grid as before.
@@ -978,8 +1260,40 @@ pub fn build_playback_grid(
         return None;
     }
 
-    let periods = true_periods(lengths, ratios);
     let kernel = resample_kernel();
+    // What the pitch track says, then what the source says. This grid's buckets
+    // are the **measured** periods laid end to end from the start of the source,
+    // so there are as many of them as fit — not necessarily the analysis's
+    // count, and nothing below may assume it is.
+    let contour = true_periods(lengths, ratios);
+    let measured = measured_periods(&source, &kernel, lengths, &contour);
+    let pitch_correction = {
+        let mut off: Vec<f32> =
+            measured.iter().zip(&contour).map(|(&m, &c)| m / c.max(1e-6)).collect();
+        off.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        off.get(off.len() / 2).copied().filter(|c| c.is_finite() && *c > 0.0).unwrap_or(1.0)
+    };
+    let mut bucket_ends = Vec::with_capacity(nb);
+    let mut end = 0usize;
+    for &l in lengths {
+        end += l;
+        bucket_ends.push(end);
+    }
+    let mut periods: Vec<f32> = Vec::with_capacity(nb + 8);
+    let mut at = 0.0f64;
+    loop {
+        let b = bucket_ends.partition_point(|&e| (e as f64) <= at).min(nb - 1);
+        let t = measured[b] as f64;
+        if at + t > source.len() as f64 && !periods.is_empty() {
+            break;
+        }
+        periods.push(t as f32);
+        at += t;
+        if at >= source.len() as f64 {
+            break;
+        }
+    }
+    let nb = periods.len();
     let mut planner = RealFftPlanner::<f32>::new();
     let mut out_amp = vec![vec![0.0f32; nb]; num_harmonics];
     let mut out_phase = vec![vec![0.0f32; nb]; num_harmonics];
@@ -1092,6 +1406,7 @@ pub fn build_playback_grid(
         spans: spans_out,
         rotations,
         usable_harmonics,
+        pitch_correction,
         norm_divisor: divisor,
     })
 }
@@ -1328,7 +1643,10 @@ pub fn resynthesize_key(
     // on the output rate.
     let rate = out_rate / analysis_rate;
     let periods: Vec<f32> =
-        grid.periods.iter().map(|&t| (base_period * t / nominal).max(2.0)).collect();
+        grid.periods
+            .iter()
+            .map(|&t| (base_period * t / (nominal * grid.pitch_correction)).max(2.0))
+            .collect();
     let spans: Vec<f32> = grid.spans.iter().map(|&l| (l * rate).max(1.0)).collect();
 
     // `build_playback_grid` has already normalised, so re-normalising here would
@@ -1845,17 +2163,24 @@ impl SynthComputeEngine {
             // fall through to the renderer, which works from `base_freq` in Hz
             // and is rate-correct by construction.
             let analysis_rate = *self.shared_params.analysis_sample_rate.lock().unwrap();
-            if !lengths.is_empty() && analysis_rate > 0.0 && sample_rate > 0.0 {
+            let ampl_enabled = self.shared_params.harmonic_ampl_enabled.lock().unwrap();
+            let phase_enabled = self.shared_params.harmonic_phase_enabled.lock().unwrap();
+            // The exact inverse is exact for the **whole** grid only. Its buckets
+            // join because each one puts back the very samples it was cut from;
+            // take a harmonic out, or zero a phase, and every bucket becomes a
+            // different waveform that no longer ends where the next begins — a
+            // step per period, broadband, on precisely the audition someone is
+            // using to hear a few harmonics on their own (−29 dB above the
+            // fifth harmonic of a five-harmonic voice). With anything switched
+            // off, the renderer below is the right tool: it closes every join
+            // over whatever is left ([`Joins`]).
+            let whole = ampl_enabled.iter().chain(phase_enabled.iter()).all(|&on| on);
+            if whole && !lengths.is_empty() && analysis_rate > 0.0 && sample_rate > 0.0 {
                 let amp = self.shared_params.amplitude_data.lock().unwrap();
                 let phase = self.shared_params.phase_data.lock().unwrap();
                 let dc = self.shared_params.analysis_dc.lock().unwrap();
                 let nyq = self.shared_params.analysis_nyquist.lock().unwrap();
                 let display_gain = *self.shared_params.analysis_display_gain.lock().unwrap();
-                // The per-harmonic checkboxes apply here too: the audition is
-                // what the user judges an edit by, so a harmonic switched off in
-                // the grid has to be absent from it, exactly as it is on a key.
-                let ampl_enabled = self.shared_params.harmonic_ampl_enabled.lock().unwrap();
-                let phase_enabled = self.shared_params.harmonic_phase_enabled.lock().unwrap();
                 let mut sound = resynthesize_exact(
                     &amp,
                     &phase,
@@ -1881,7 +2206,13 @@ impl SynthComputeEngine {
             }
         }
 
-        let base_period = sample_rate / base_freq;
+        // The source's own period — the pitch track's, put right by the
+        // measurement (`PlaybackGrid::pitch_correction`), or this "original
+        // pitch" is a transposition by however far the track was out.
+        let correction = playback_grid(&self.shared_params)
+            .map(|g| g.pitch_correction)
+            .unwrap_or(1.0);
+        let base_period = sample_rate / base_freq * correction;
         // Only the Nyquist limit applies here — the anti-alias cap is a
         // per-*key* quantity and there is no key involved. `render_key_buffer`
         // still clamps to `period / 2`, which is exactly that limit.
@@ -1893,7 +2224,19 @@ impl SynthComputeEngine {
         // re-normalises first when the grid changed, and it is that render's
         // divisor we have to undo.
         let display_gain = *self.shared_params.analysis_display_gain.lock().unwrap();
-        let divisor = *self.shared_params.grid_norm_divisor.lock().unwrap();
+        // …and it is the divisor of the grid that render *used*: the
+        // `PlaybackGrid` normalises itself, by a different amount.
+        let divisor = if self.shared_params.used_playback_grid.load(Ordering::Relaxed) {
+            self.shared_params
+                .playback_grid
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|g| g.norm_divisor)
+                .unwrap_or(0.0)
+        } else {
+            *self.shared_params.grid_norm_divisor.lock().unwrap()
+        };
         if let Some(scale) = source_level_scale(display_gain, divisor) {
             let scale = scale / VOICE_MIX_SCALING;
             // Unclamped for the same reason as above: the mixer scales this back
@@ -4037,6 +4380,152 @@ mod keyboard_fidelity {
             println!(
                 "vib {vib}: true periods vs recorded boundaries — worst running gap {worst:.2} \
                  samples, closing at {cum:.2}"
+            );
+        }
+    }
+
+    /// A source whose periods differ, so that every bucket's cut has a wrap step
+    /// of its own: three low harmonics that drift slowly, as a held vowel's do,
+    /// under a band of upper ones (9 to 16) that flutter from one period to the
+    /// next, as its breath does. `with_upper: false` is the low three alone —
+    /// what is left when the upper band is switched off.
+    fn breathing(sr: f32, f0: f32, secs: f32, with_upper: bool) -> Vec<f32> {
+        (0..(sr * secs) as usize)
+            .map(|i| {
+                let t = i as f32 / sr;
+                let w = TWO_PI * f0 * t;
+                let partial = |k: usize, level: f32| {
+                    let kk = k as f32;
+                    level / kk.sqrt() * (w * kk + 0.7 * kk).sin()
+                };
+                let low: f32 = (1..=3)
+                    .map(|k| partial(k, 1.0 + 0.2 * (TWO_PI * (1.0 + k as f32) * t).sin()))
+                    .sum();
+                let upper: f32 = (9..=16)
+                    .map(|k| partial(k, 1.0 + 0.9 * (TWO_PI * (17.0 + 3.0 * k as f32) * t).sin()))
+                    .sum();
+                0.2 * (low + if with_upper { upper } else { 0.0 })
+            })
+            .collect()
+    }
+
+    /// Power above `cutoff` Hz over the whole buffer's, in dB, Hann-windowed.
+    fn above_db(x: &[f32], sr: f32, cutoff: f32) -> f64 {
+        let n = x.len() & !1;
+        let mut windowed: Vec<f32> = (0..n)
+            .map(|i| x[i] * (0.5 - 0.5 * (TWO_PI * i as f32 / n as f32).cos()))
+            .collect();
+        let fft = RealFftPlanner::<f32>::new().plan_fft_forward(n);
+        let mut spectrum = fft.make_output_vec();
+        fft.process(&mut windowed, &mut spectrum).unwrap();
+        let first = (cutoff * n as f32 / sr).ceil() as usize;
+        let power = |bins: &[Complex<f32>]| -> f64 {
+            bins.iter().map(|c| (c.re as f64).powi(2) + (c.im as f64).powi(2)).sum()
+        };
+        10.0 * (power(&spectrum[first..]).max(1e-300) / power(&spectrum).max(1e-300)).log10()
+    }
+
+    /// Switch off every harmonic but the first three and nothing may be left
+    /// above them — on a key, and on the Original Pitch audition.
+    ///
+    /// The grains of a `PlaybackGrid` join because a wrap ramp bridges each
+    /// one's end to the next one's start, and that ramp was measured on the
+    /// *whole* waveform. With harmonics off the rendered waveform starts
+    /// somewhere else, so each period ended a step from the next: a broadband
+    /// buzz, at its most audible on exactly the dull few-harmonic note that has
+    /// nothing to mask it. The audition had the same step from the other
+    /// direction, inverting each bucket without the harmonics that made it join.
+    #[test]
+    fn a_few_harmonics_on_their_own_have_nothing_above_them() {
+        let sr = 44_100.0f32;
+        let f0 = 110.0f32;
+        let engine = SynthComputeEngine::new(Arc::new(LeSynthParams::default()));
+        engine.shared_params.update_sample_rate(sr);
+        engine.analyze_and_load(&breathing(sr, f0, 1.0, true), sr, f0, &[], 0);
+        {
+            let mut on = engine.shared_params.harmonic_ampl_enabled.lock().unwrap();
+            for flag in on.iter_mut().skip(3) {
+                *flag = false;
+            }
+        }
+        engine.set_normalization_needed(true);
+        engine.shared_params.mark_all_buffers_dirty();
+
+        let mut renders = vec![("the audition".to_string(), f0, engine.assemble_buffer_at_original_pitch())];
+        for key in [17usize, 31, 43] {
+            let hz = 27.5 * 2f32.powf(key as f32 / 12.0);
+            renders.push((format!("key {key}"), hz, engine.assemble_buffer_for_key(key)));
+        }
+        // The audition is at the source's own pitch and on its own clock, so
+        // there is a right answer to hold it to: the source's first three
+        // harmonics and nothing else. This is the half the spectrum above cannot
+        // see — what the missing band does to the harmonics that are left.
+        let want = breathing(sr, f0, 1.0, false);
+        let got = &renders[0].2;
+        let span = sr as usize / 10..got.len().min(want.len()) - sr as usize / 10;
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for i in span.clone() {
+            num += got[i] as f64 * want[i] as f64;
+            den += want[i] as f64 * want[i] as f64;
+        }
+        let gain = num / den;
+        let (mut err, mut sig) = (0.0f64, 0.0f64);
+        for i in span {
+            err += (got[i] as f64 - gain * want[i] as f64).powi(2);
+            sig += (gain * want[i] as f64).powi(2);
+        }
+        let db = 10.0 * (err / sig).log10();
+        println!("the audition against the source's own three harmonics: {db:.1} dB");
+        assert!(
+            db < -20.0,
+            "the audition is {db:.1} dB from the source's first three harmonics — \
+             the band switched off is still shaping the one left on"
+        );
+
+        for (name, hz, x) in &renders {
+            assert!(!x.is_empty(), "{name} must render");
+            // Twice the top harmonic left on: clear of it and of its sidebands.
+            let db = above_db(x, sr, 6.0 * hz);
+            println!("{name}: {db:.1} dB above {:.0} Hz", 6.0 * hz);
+            assert!(
+                db < -50.0,
+                "{name}: {db:.1} dB above harmonic 6 with only three harmonics on — \
+                 the periods do not join"
+            );
+        }
+    }
+
+    /// A key must not depend on the pitch track being right.
+    ///
+    /// The track only says where the analysis cut its buckets. Read 3% sharp —
+    /// a real voice was, for half a note, its tracker fooled by a formant — each
+    /// bucket is an incomplete cycle, and a key that repeats or skips incomplete
+    /// cycles jumps every harmonic's phase at every splice. The grid measures
+    /// the period on the source instead, and the key must come out the same
+    /// steady tone, at the key's own pitch, as from a track that was right.
+    #[test]
+    fn a_key_survives_a_pitch_track_that_is_wrong() {
+        let sr = 44_000.0; // key 36 = 220 Hz = a 200-sample period
+        let f0 = 110.0f32;
+        let src = steady(sr, f0, 0.6);
+        for wrong in [1.03f32, 0.97] {
+            let engine = SynthComputeEngine::new(Arc::new(LeSynthParams::default()));
+            engine.shared_params.update_sample_rate(sr);
+            engine.analyze_and_load(&src, sr, f0 * wrong, &[], 0);
+            let grid = playback_grid(&engine.shared_params).unwrap();
+            let period = grid.periods[grid.periods.len() / 2];
+            assert!(
+                (period - sr / f0).abs() < 0.2,
+                "track {wrong}x: the grid holds a {period}-sample period, the source's is {}",
+                sr / f0
+            );
+            let x = engine.assemble_buffer_for_key(36);
+            let periodic = aperiodicity_db(&x, 200);
+            println!("track {wrong}x: key 36 aperiodicity {periodic:.1} dB");
+            assert!(
+                periodic < -35.0,
+                "track {wrong}x: {periodic:.1} dB of aperiodicity on key 36 — the key \
+                 is splicing incomplete cycles, or is off its pitch"
             );
         }
     }
