@@ -22,6 +22,9 @@ use std::sync::Arc;
 use nih_plug_egui::egui::{self, Color32, RichText};
 use crate::engine::{ChartType, SynthComputeEngine};
 
+/// Top of the "Last harmonic" slider's range.
+const LAST_HARMONIC_MAX: usize = 255;
+
 pub fn draw_analysis_controls(
     ui: &mut egui::Ui,
     engine: &Arc<SynthComputeEngine>,
@@ -87,10 +90,50 @@ pub fn draw_analysis_controls(
     let mut amp_custom = shared.harmonic_ampl_custom.lock().unwrap().clone();
     let mut phase_custom = shared.harmonic_phase_custom.lock().unwrap().clone();
 
+    // Bulk controls above the grid: Enable / Disable all, and a slider that
+    // sets the last enabled harmonic (harmonics 1..=N on, the rest off, amp
+    // and phase alike). The slider reads back the highest harmonic currently
+    // enabled, or 0 when none is, so it always agrees with the toggles.
+    ui.horizontal(|ui| {
+        if ui.button("Enable all").clicked() {
+            amp_enabled.iter_mut().for_each(|e| *e = true);
+            phase_enabled.iter_mut().for_each(|e| *e = true);
+            changed = true;
+        }
+        if ui.button("Disable all").clicked() {
+            amp_enabled.iter_mut().for_each(|e| *e = false);
+            phase_enabled.iter_mut().for_each(|e| *e = false);
+            changed = true;
+        }
+        ui.add_space(12.0);
+        ui.label("Last harmonic");
+        let mut last = (0..num_harmonics)
+            .rev()
+            .find(|&n| amp_enabled[n] || phase_enabled[n])
+            .map_or(0, |n| n + 1);
+        // Never clamp: an all-disabled grid shows 0 rather than snapping to 1.
+        if ui
+            .add(
+                egui::Slider::new(&mut last, 1..=LAST_HARMONIC_MAX)
+                    .clamping(egui::SliderClamping::Never),
+            )
+            .on_hover_text("Enable harmonics 1 to N and disable the rest")
+            .changed()
+        {
+            let last = last.min(LAST_HARMONIC_MAX).min(num_harmonics);
+            for n in 0..num_harmonics {
+                amp_enabled[n] = n < last;
+                phase_enabled[n] = n < last;
+            }
+            changed = true;
+        }
+    });
+    ui.add_space(4.0);
+
     // Size the toggle grid so the whole control box fills the same
     // window_height * 0.40 region the Synth-mode control box occupies. The
-    // header/description labels and the Enable/Disable buttons take a roughly
-    // fixed amount of chrome above and below the grid; reserve for it so the
+    // header/description labels and the Enable/Disable + slider row take a
+    // roughly fixed amount of chrome above the grid; reserve for it so the
     // analysis box matches the Synth box height (and keyboard/charts align).
     const CHROME: f32 = 115.0;
     let grid_height = (window_height * 0.40 - CHROME).max(140.0);
@@ -193,20 +236,6 @@ pub fn draw_analysis_controls(
                 }
             });
         });
-
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        if ui.button("Enable all").clicked() {
-            amp_enabled.iter_mut().for_each(|e| *e = true);
-            phase_enabled.iter_mut().for_each(|e| *e = true);
-            changed = true;
-        }
-        if ui.button("Disable all").clicked() {
-            amp_enabled.iter_mut().for_each(|e| *e = false);
-            phase_enabled.iter_mut().for_each(|e| *e = false);
-            changed = true;
-        }
-    });
 
     if changed {
         *shared.harmonic_ampl_enabled.lock().unwrap() = amp_enabled;
