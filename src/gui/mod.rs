@@ -14,6 +14,7 @@
 
 pub mod analysis_controls;
 pub mod piano_keyboard;
+pub mod harmonic_draw;
 pub mod harmonic_plot;
 pub mod assembled_chart;
 pub mod curve_controls;

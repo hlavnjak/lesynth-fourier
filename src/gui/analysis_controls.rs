@@ -20,7 +20,8 @@
 
 use std::sync::Arc;
 use nih_plug_egui::egui::{self, Color32, RichText};
-use crate::engine::{ChartType, SynthComputeEngine};
+use crate::engine::{ChartType, HarmonicSource, SynthComputeEngine};
+use crate::gui::harmonic_draw::{draw_session, set_draw_session, DrawSession};
 
 /// Top of the "Last harmonic" slider's range.
 const LAST_HARMONIC_MAX: usize = 255;
@@ -37,7 +38,7 @@ pub fn draw_analysis_controls(
 
     // Whether analysis data has actually been loaded. When the plugin is opened
     // in plain Synth mode (no subtrack analysed) there is no analysed curve to
-    // override, so the per-harmonic "cust" checkboxes are disabled.
+    // go back to, so the per-harmonic source boxes do not offer "analysed".
     let has_analysis = *shared.analysis_duration_secs.lock().unwrap() > 0.0;
 
     ui.label(
@@ -49,8 +50,8 @@ pub fn draw_analysis_controls(
     ui.label(
         RichText::new(
             "The amplitude / phase grid below was extracted from the input audio. \
-             Enable or disable harmonics to shape the resynthesis. Tick \"cust\" to \
-             override a harmonic's analysed curve with your Synth-mode curve.",
+             Enable or disable harmonics to shape the resynthesis. Each curve can \
+             be replaced by your Synth-mode curve or by one you draw on its chart (✏).",
         )
         .size(11.0)
         .color(Color32::from_gray(190)),
@@ -85,10 +86,6 @@ pub fn draw_analysis_controls(
     // Snapshot current enable flags, render toggles, write back any change.
     let mut amp_enabled = shared.harmonic_ampl_enabled.lock().unwrap().clone();
     let mut phase_enabled = shared.harmonic_phase_enabled.lock().unwrap().clone();
-    // Custom-override flags are applied through the engine (which rewrites /
-    // restores the harmonic's row), so toggle them immediately on change.
-    let mut amp_custom = shared.harmonic_ampl_custom.lock().unwrap().clone();
-    let mut phase_custom = shared.harmonic_phase_custom.lock().unwrap().clone();
 
     // Bulk controls above the grid: Enable / Disable all, and a slider that
     // sets the last enabled harmonic (harmonics 1..=N on, the rest off, amp
@@ -142,9 +139,9 @@ pub fn draw_analysis_controls(
         .auto_shrink([false; 2])
         .max_height(grid_height)
         .show(ui, |ui| {
-            // Lay the harmonics out in columns. Each entry now carries four
-            // toggles (amp / amp-custom / phase / phase-custom), so widen them.
-            let cols = (window_width / 240.0).floor().max(1.0) as usize;
+            // Lay the harmonics out in columns. Each entry carries a toggle, a
+            // source box and a draw button for amplitude and again for phase.
+            let cols = (window_width / 400.0).floor().max(1.0) as usize;
             let per_col = num_harmonics.div_ceil(cols);
             ui.horizontal_top(|ui| {
                 for c in 0..cols {
@@ -186,20 +183,9 @@ pub fn draw_analysis_controls(
                                 {
                                     changed = true;
                                 }
-                                if ui
-                                    .add_enabled(
-                                        has_analysis,
-                                        egui::Checkbox::new(&mut amp_custom[n], "cust"),
-                                    )
-                                    .on_hover_text(if has_analysis {
-                                        "Override the analysed amplitude curve with your \
-                                         Synth-mode curve (Constant / Nested Fourier)"
-                                    } else {
-                                        "No analysed audio loaded — nothing to override"
-                                    })
-                                    .changed()
-                                {
-                                    engine.set_harmonic_custom(n, ChartType::Amp, amp_custom[n]);
+                                if source_controls(ui, engine, n, ChartType::Amp, has_analysis) {
+                                    amp_enabled[n] = true;
+                                    changed = true;
                                 }
                                 if ui
                                     .checkbox(&mut phase_enabled[n], "phase")
@@ -208,24 +194,9 @@ pub fn draw_analysis_controls(
                                 {
                                     changed = true;
                                 }
-                                if ui
-                                    .add_enabled(
-                                        has_analysis,
-                                        egui::Checkbox::new(&mut phase_custom[n], "cust"),
-                                    )
-                                    .on_hover_text(if has_analysis {
-                                        "Override the analysed phase curve with your \
-                                         Synth-mode curve (Constant / Nested Fourier)"
-                                    } else {
-                                        "No analysed audio loaded — nothing to override"
-                                    })
-                                    .changed()
-                                {
-                                    engine.set_harmonic_custom(
-                                        n,
-                                        ChartType::Phase,
-                                        phase_custom[n],
-                                    );
+                                if source_controls(ui, engine, n, ChartType::Phase, has_analysis) {
+                                    phase_enabled[n] = true;
+                                    changed = true;
                                 }
                             });
                         }
@@ -244,4 +215,79 @@ pub fn draw_analysis_controls(
         shared.mark_all_buffers_dirty();
         engine.update_assembled_chart_with_key24();
     }
+}
+
+/// One harmonic's source box and draw button, for its amplitude or its phase.
+/// Answers `true` when a drawing was just started — the caller switches the
+/// harmonic on, since a curve nobody can see cannot be drawn.
+///
+/// The box says where the row comes from: the analysis, the harmonic's Synth
+/// curve, or a curve drawn by hand. The pencil starts a drawing on the chart
+/// (switching the row to "drawn" if it was not), and pressed again stops it.
+fn source_controls(
+    ui: &mut egui::Ui,
+    engine: &Arc<SynthComputeEngine>,
+    n: usize,
+    chart: ChartType,
+    has_analysis: bool,
+) -> bool {
+    let what = match chart {
+        ChartType::Amp => "amplitude",
+        ChartType::Phase => "phase",
+    };
+    let name = |source: HarmonicSource| match source {
+        HarmonicSource::Analysed => "analysed",
+        HarmonicSource::Synth => "synth",
+        HarmonicSource::Drawn => "drawn",
+    };
+    let current = engine.harmonic_source(n, chart);
+    let mut picked = current;
+    egui::ComboBox::from_id_salt(("harmonic_source", chart, n))
+        .width(74.0)
+        .selected_text(name(current))
+        .show_ui(ui, |ui| {
+            if has_analysis {
+                ui.selectable_value(&mut picked, HarmonicSource::Analysed, "analysed")
+                    .on_hover_text(format!("The {what} curve measured from the audio"));
+            }
+            ui.selectable_value(&mut picked, HarmonicSource::Synth, "synth")
+                .on_hover_text(format!(
+                    "Your Synth-mode {what} curve (Constant / Nested Fourier)"
+                ));
+            ui.selectable_value(&mut picked, HarmonicSource::Drawn, "drawn")
+                .on_hover_text(format!(
+                    "A {what} curve drawn by hand — press ✏ to draw it on the chart"
+                ));
+        })
+        .response
+        .on_hover_text(format!("Where this harmonic's {what} curve comes from"));
+    if picked != current {
+        engine.set_harmonic_source(n, chart, picked);
+    }
+
+    let session = draw_session(ui.ctx());
+    let mine = session.is_some_and(|d| d.chart == chart && d.harmonic == n);
+    // A row handed to another source is no longer being drawn.
+    if mine && picked != HarmonicSource::Drawn {
+        set_draw_session(ui.ctx(), None);
+    }
+    let pencil = ui
+        .add(egui::Button::new("✏").small().selected(mine && picked == HarmonicSource::Drawn))
+        .on_hover_text(format!(
+            "Draw this harmonic's {what} curve on the chart.\n\nThe pen starts at the \
+             left edge. Hold the left mouse button and move right to draw; release it \
+             to move the pen up or down without drawing, then press again to carry on \
+             from there."
+        ));
+    if pencil.clicked() {
+        if mine {
+            engine.commit_drawn();
+            set_draw_session(ui.ctx(), None);
+        } else {
+            engine.set_harmonic_source(n, chart, HarmonicSource::Drawn);
+            set_draw_session(ui.ctx(), Some(DrawSession::new(chart, n)));
+            return true;
+        }
+    }
+    false
 }

@@ -1711,6 +1711,17 @@ fn target_samples_for(shared_params: &SharedParams) -> usize {
     }
 }
 
+/// Where one harmonic's amplitude or phase row comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarmonicSource {
+    /// The row the analysis measured.
+    Analysed,
+    /// The harmonic's Synth-mode curve — Constant or Nested Fourier.
+    Synth,
+    /// A curve drawn by hand on the chart.
+    Drawn,
+}
+
 // Deliberately not `Clone`: the engine lives behind an `Arc` (the registry holds
 // `Weak`s), and a value-copy would duplicate the analysis mailbox and editor
 // registration while the compute thread kept serving only the original.
@@ -1798,6 +1809,10 @@ impl SynthComputeEngine {
     /// only where "cust" is ticked. Without the gate, drawing would silently
     /// clobber an analysed row nobody asked to override.
     fn curve_overrides_live(&self, n: usize, chart_type: ChartType) -> bool {
+        // A row drawn by hand belongs to the drawing, analysis or no analysis.
+        if self.is_harmonic_drawn(n, chart_type) {
+            return false;
+        }
         let has_analysis = *self.shared_params.analysis_duration_secs.lock().unwrap() > 0.0;
         if !has_analysis {
             return true;
@@ -2675,6 +2690,12 @@ impl SynthComputeEngine {
                 .unwrap()
                 .iter_mut()
                 .for_each(|c| *c = false);
+            // …and that includes anything drawn over the previous grid.
+            let shared = &self.shared_params;
+            shared.harmonic_ampl_drawn.lock().unwrap().iter_mut().for_each(|d| *d = false);
+            shared.harmonic_phase_drawn.lock().unwrap().iter_mut().for_each(|d| *d = false);
+            shared.drawn_amplitude_rows.lock().unwrap().iter_mut().for_each(|r| *r = None);
+            shared.drawn_phase_rows.lock().unwrap().iter_mut().for_each(|r| *r = None);
         }
 
         {
@@ -2761,6 +2782,161 @@ impl SynthComputeEngine {
             self.shared_params.mark_all_buffers_dirty();
             self.update_assembled_chart_with_key24();
         }
+    }
+
+    fn is_harmonic_drawn(&self, n: usize, chart_type: ChartType) -> bool {
+        let flags = match chart_type {
+            ChartType::Amp => self.shared_params.harmonic_ampl_drawn.lock().unwrap(),
+            ChartType::Phase => self.shared_params.harmonic_phase_drawn.lock().unwrap(),
+        };
+        flags.get(n).copied().unwrap_or(false)
+    }
+
+    /// Whether an analysed grid is loaded — whether there is an analysed row
+    /// for a harmonic to go back to.
+    pub fn has_analysis(&self) -> bool {
+        *self.shared_params.analysis_duration_secs.lock().unwrap() > 0.0
+    }
+
+    /// Where harmonic `n`'s amplitude or phase row comes from.
+    pub fn harmonic_source(&self, n: usize, chart_type: ChartType) -> HarmonicSource {
+        if self.is_harmonic_drawn(n, chart_type) {
+            return HarmonicSource::Drawn;
+        }
+        // With nothing analysed the Synth curve owns every row it is not
+        // drawn out of; with an analysis loaded it owns only the "cust" ones.
+        let custom = {
+            let flags = match chart_type {
+                ChartType::Amp => self.shared_params.harmonic_ampl_custom.lock().unwrap(),
+                ChartType::Phase => self.shared_params.harmonic_phase_custom.lock().unwrap(),
+            };
+            flags.get(n).copied().unwrap_or(false)
+        };
+        if custom || !self.has_analysis() {
+            HarmonicSource::Synth
+        } else {
+            HarmonicSource::Analysed
+        }
+    }
+
+    /// Hand harmonic `n`'s row to another source.
+    ///
+    /// Leaving [`HarmonicSource::Drawn`] puts the drawing aside rather than
+    /// throwing it away, and coming back to it brings it back — as long as the
+    /// grid still has the number of buckets it was drawn over. A row switched
+    /// to `Drawn` for the first time keeps whatever it held, so a drawing
+    /// starts from the curve it replaces and overwrites it left to right.
+    ///
+    /// `Analysed` with no analysis loaded has no row to restore and means
+    /// `Synth`.
+    pub fn set_harmonic_source(&self, n: usize, chart_type: ChartType, source: HarmonicSource) {
+        if n >= self.shared_params.amplitude_data.lock().unwrap().len() {
+            return;
+        }
+        let was = self.harmonic_source(n, chart_type);
+        let source = match source {
+            HarmonicSource::Analysed if !self.has_analysis() => HarmonicSource::Synth,
+            other => other,
+        };
+        if was == source {
+            return;
+        }
+        let shared = &self.shared_params;
+        let set_drawn = |drawn: bool| {
+            let mut flags = match chart_type {
+                ChartType::Amp => shared.harmonic_ampl_drawn.lock().unwrap(),
+                ChartType::Phase => shared.harmonic_phase_drawn.lock().unwrap(),
+            };
+            flags[n] = drawn;
+        };
+        if was == HarmonicSource::Drawn {
+            let row = match chart_type {
+                ChartType::Amp => shared.amplitude_data.lock().unwrap()[n].clone(),
+                ChartType::Phase => shared.phase_data.lock().unwrap()[n].clone(),
+            };
+            let mut kept = match chart_type {
+                ChartType::Amp => shared.drawn_amplitude_rows.lock().unwrap(),
+                ChartType::Phase => shared.drawn_phase_rows.lock().unwrap(),
+            };
+            kept[n] = Some(row);
+        }
+        match source {
+            HarmonicSource::Drawn => {
+                set_drawn(true);
+                let kept = match chart_type {
+                    ChartType::Amp => shared.drawn_amplitude_rows.lock().unwrap()[n].clone(),
+                    ChartType::Phase => shared.drawn_phase_rows.lock().unwrap()[n].clone(),
+                };
+                if let Some(kept) = kept {
+                    let mut data = match chart_type {
+                        ChartType::Amp => shared.amplitude_data.lock().unwrap(),
+                        ChartType::Phase => shared.phase_data.lock().unwrap(),
+                    };
+                    if data[n].len() == kept.len() {
+                        data[n] = kept;
+                    }
+                }
+                self.commit_drawn();
+            }
+            HarmonicSource::Synth => {
+                set_drawn(false);
+                self.set_harmonic_custom(n, chart_type, true);
+            }
+            HarmonicSource::Analysed => {
+                set_drawn(false);
+                self.set_harmonic_custom(n, chart_type, false);
+            }
+        }
+    }
+
+    /// Write hand-drawn values into harmonic `n`'s row: `(bucket, value)`
+    /// pairs, held to what the row can carry — an amplitude is not negative, a
+    /// phase is an angle in 0..2π. Only a row switched to
+    /// [`HarmonicSource::Drawn`] is written, and nothing is re-rendered until
+    /// [`Self::commit_drawn`]: this runs once per painted frame while the pen
+    /// is down.
+    pub fn write_drawn_points(&self, n: usize, chart_type: ChartType, points: &[(usize, f32)]) {
+        if points.is_empty() || !self.is_harmonic_drawn(n, chart_type) {
+            return;
+        }
+        let mut data = match chart_type {
+            ChartType::Amp => self.shared_params.amplitude_data.lock().unwrap(),
+            ChartType::Phase => self.shared_params.phase_data.lock().unwrap(),
+        };
+        let Some(row) = data.get_mut(n) else { return };
+        for &(bucket, value) in points {
+            if let Some(slot) = row.get_mut(bucket) {
+                *slot = match chart_type {
+                    ChartType::Amp => value.max(0.0),
+                    ChartType::Phase => value.clamp(0.0, crate::constants::TWO_PI),
+                };
+            }
+        }
+    }
+
+    /// Flatten a drawn row to zero — a clean sheet to draw on.
+    pub fn clear_drawn_row(&self, n: usize, chart_type: ChartType) {
+        if !self.is_harmonic_drawn(n, chart_type) {
+            return;
+        }
+        {
+            let mut data = match chart_type {
+                ChartType::Amp => self.shared_params.amplitude_data.lock().unwrap(),
+                ChartType::Phase => self.shared_params.phase_data.lock().unwrap(),
+            };
+            if let Some(row) = data.get_mut(n) {
+                row.iter_mut().for_each(|v| *v = 0.0);
+            }
+        }
+        self.commit_drawn();
+    }
+
+    /// Make what was drawn audible: re-normalise, drop every rendered key and
+    /// redraw the assembled sound.
+    pub fn commit_drawn(&self) {
+        self.set_normalization_needed(true);
+        self.shared_params.mark_all_buffers_dirty();
+        self.update_assembled_chart_with_key24();
     }
 
     /// Analyse a subtrack and load the resulting grid, switching to Analysis
@@ -3247,6 +3423,71 @@ mod tests {
         let plotted = engine.shared_params.assembled_sound_plotted.lock().unwrap();
         assert!(!plotted.is_empty(), "assembled chart is empty after analysis load");
         assert!(max_abs(&plotted) > 0.01, "assembled chart is silent");
+    }
+
+    /// A harmonic's row can be handed to a curve drawn on the chart. The
+    /// drawing owns the row from then on — the Synth curve leaves it alone —
+    /// and it is put aside, not thrown away, while another source has the row.
+    #[test]
+    fn a_drawn_row_is_kept_while_another_source_has_it() {
+        let engine = create_test_engine();
+        engine.analyze_and_load(&tone(44100.0, 440.0, 1.0), 44100.0, 440.0, &[], 0);
+        let h = 2usize;
+        let analysed = engine.shared_params.amplitude_data.lock().unwrap()[h].clone();
+        assert_eq!(engine.harmonic_source(h, ChartType::Amp), HarmonicSource::Analysed);
+
+        // Nothing is written to a row that is not drawn.
+        engine.write_drawn_points(h, ChartType::Amp, &[(0, 0.5)]);
+        assert_eq!(engine.shared_params.amplitude_data.lock().unwrap()[h], analysed);
+
+        // Switched to drawn: the row starts as the curve it replaces.
+        engine.set_harmonic_source(h, ChartType::Amp, HarmonicSource::Drawn);
+        assert_eq!(engine.harmonic_source(h, ChartType::Amp), HarmonicSource::Drawn);
+        assert_eq!(engine.shared_params.amplitude_data.lock().unwrap()[h], analysed);
+
+        // Drawn over: held to what an amplitude can be, and to the row's length.
+        engine.write_drawn_points(h, ChartType::Amp, &[(0, 0.5), (1, -0.25), (1_000_000, 0.9)]);
+        engine.commit_drawn();
+        let drawn = engine.shared_params.amplitude_data.lock().unwrap()[h].clone();
+        assert_eq!(&drawn[..2], &[0.5, 0.0]);
+        assert_eq!(&drawn[2..], &analysed[2..]);
+
+        // The Synth curve does not get the row back by being refilled.
+        engine.fill_constant_curve(h, 0.123, ChartType::Amp);
+        assert_eq!(engine.shared_params.amplitude_data.lock().unwrap()[h], drawn);
+
+        // Back to the analysis, and back to the drawing.
+        engine.set_harmonic_source(h, ChartType::Amp, HarmonicSource::Analysed);
+        assert_eq!(engine.shared_params.amplitude_data.lock().unwrap()[h], analysed);
+        engine.set_harmonic_source(h, ChartType::Amp, HarmonicSource::Drawn);
+        assert_eq!(engine.shared_params.amplitude_data.lock().unwrap()[h], drawn);
+
+        // Cleared is a flat sheet; the phase row was never part of any of it.
+        engine.clear_drawn_row(h, ChartType::Amp);
+        assert!(engine.shared_params.amplitude_data.lock().unwrap()[h].iter().all(|&v| v == 0.0));
+        assert_eq!(engine.harmonic_source(h, ChartType::Phase), HarmonicSource::Analysed);
+
+        // A new analysis starts fully analysed again.
+        engine.analyze_and_load(&tone(44100.0, 440.0, 1.0), 44100.0, 440.0, &[], 0);
+        assert_eq!(engine.harmonic_source(h, ChartType::Amp), HarmonicSource::Analysed);
+    }
+
+    /// With nothing analysed there is no analysed row to go back to: a row is
+    /// its Synth curve or a drawing, and asking for "analysed" means the curve.
+    #[test]
+    fn without_an_analysis_a_row_is_synth_or_drawn() {
+        let engine = create_test_engine();
+        let h = 0usize;
+        assert_eq!(engine.harmonic_source(h, ChartType::Phase), HarmonicSource::Synth);
+        engine.set_harmonic_source(h, ChartType::Phase, HarmonicSource::Drawn);
+        engine.write_drawn_points(h, ChartType::Phase, &[(0, 1.0), (1, 99.0)]);
+        {
+            let phase = engine.shared_params.phase_data.lock().unwrap();
+            assert_eq!(phase[h][0], 1.0);
+            assert_eq!(phase[h][1], crate::constants::TWO_PI, "a phase is an angle");
+        }
+        engine.set_harmonic_source(h, ChartType::Phase, HarmonicSource::Analysed);
+        assert_eq!(engine.harmonic_source(h, ChartType::Phase), HarmonicSource::Synth);
     }
 
     #[test]

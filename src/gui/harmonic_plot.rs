@@ -16,7 +16,8 @@ use std::sync::Arc;
 use nih_plug_egui::egui::{self, RichText};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints, Points};
 use crate::constants::TWO_PI;
-use crate::engine::{ChartType, SynthComputeEngine};
+use crate::engine::{ChartType, HarmonicSource, SynthComputeEngine};
+use crate::gui::harmonic_draw::{draw_session, set_draw_session, DrawSession};
 use crate::modulation::Envelope;
 
 /// A harmonic quieter than this fraction of its bucket's loudest harmonic
@@ -110,8 +111,56 @@ pub fn draw_harmonic_plot(
         .memory(|m| m.data.get_temp(view_id))
         .unwrap_or(PhaseView::Raw);
 
+    // A curve being drawn by hand on this chart, if there is one. Not while the
+    // amplitudes are shown through the envelope: what is on screen then is not
+    // what is in the row, and a pen has to write what it draws.
+    let mut drawing: Option<DrawSession> = draw_session(ui.ctx())
+        .filter(|d| d.chart == chart_type && envelope.is_none())
+        .filter(|d| {
+            synth_compute_engine.harmonic_source(d.harmonic, chart_type) == HarmonicSource::Drawn
+        });
+    let drawing_before = drawing;
+    // A phase is drawn as the angle it is stored as.
+    if drawing.is_some() {
+        phase_view = PhaseView::Raw;
+    }
+
     ui.horizontal(|ui| {
         ui.label(RichText::new(title).strong().size(16.0));
+        if let Some(pen) = drawing {
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(format!("✏ H{}", pen.harmonic + 1))
+                    .strong()
+                    .size(12.0)
+                    .color(crate::gui::harmonic_color(pen.harmonic)),
+            )
+            .on_hover_text(
+                "Drawing this harmonic by hand.\n\nHold the left mouse button and move \
+                 right to draw. Release it and the pen stays where it is along the \
+                 chart and only moves up and down — press again to carry on from a \
+                 new height, which is how a curve with a jump in it is drawn.",
+            );
+            if ui
+                .small_button("Restart")
+                .on_hover_text("Take the pen back to the start of the chart")
+                .clicked()
+            {
+                drawing = Some(DrawSession::new(chart_type, pen.harmonic));
+            }
+            if ui
+                .small_button("Clear")
+                .on_hover_text("Flatten this harmonic's curve to zero and start again")
+                .clicked()
+            {
+                synth_compute_engine.clear_drawn_row(pen.harmonic, chart_type);
+                drawing = Some(DrawSession::new(chart_type, pen.harmonic));
+            }
+            if ui.small_button("Done").on_hover_text("Stop drawing").clicked() {
+                synth_compute_engine.commit_drawn();
+                drawing = None;
+            }
+        }
         if is_amp {
             // Push the zoom control away from the main "Amplitude" caption.
             ui.add_space(24.0);
@@ -179,7 +228,55 @@ pub fn draw_harmonic_plot(
         _ => 1.0,
     };
 
+    let last_bucket = {
+        let shared = &synth_compute_engine.shared_params;
+        let data = match chart_type {
+            ChartType::Amp => shared.amplitude_data.lock().unwrap(),
+            ChartType::Phase => shared.phase_data.lock().unwrap(),
+        };
+        data.iter().map(|d| d.len()).max().unwrap_or(1).saturating_sub(1)
+    };
+
     plot.show(ui, |plot_ui| {
+            // The pen, moved before anything is read back to be drawn so that
+            // what it wrote this frame is on screen this frame.
+            if let Some(pen) = drawing.as_mut() {
+                let pressed = plot_ui.ctx().input(|i| i.pointer.primary_down());
+                // Only a pointer over the chart itself: the plot will translate
+                // a position anywhere in the window, and a click on the grid
+                // below must not draw.
+                let over = plot_ui
+                    .ctx()
+                    .input(|i| i.pointer.latest_pos())
+                    .filter(|pos| plot_ui.response().rect.contains(*pos))
+                    .map(|pos| plot_ui.plot_from_screen(pos));
+                match over {
+                    Some(at) => {
+                        let was_down = pen.down;
+                        let drawn = pen.step(
+                            (at.x as f32, at.y as f32),
+                            pressed,
+                            last_bucket,
+                            (y_min as f32, y_max as f32),
+                        );
+                        synth_compute_engine.write_drawn_points(pen.harmonic, chart_type, &drawn);
+                        // The sound catches up when the pen is lifted, not on
+                        // every frame of the stroke.
+                        if was_down && !pen.down {
+                            synth_compute_engine.commit_drawn();
+                        }
+                        plot_ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                    }
+                    // Off the chart: a stroke in progress ends there.
+                    None if pen.down => {
+                        pen.down = false;
+                        synth_compute_engine.commit_drawn();
+                    }
+                    None => {}
+                }
+            }
+            let drawn_harmonic = drawing.map(|d| d.harmonic);
+
             let (data, enabled_flags) = match chart_type {
                 ChartType::Amp => (
                     synth_compute_engine
@@ -208,21 +305,30 @@ pub fn draw_harmonic_plot(
             };
 
             for (n, line_data) in data.iter().enumerate() {
-                if !enabled_flags[n] || line_data.iter().all(|&x| x.abs() < 1e-10) {
+                let being_drawn = drawn_harmonic == Some(n);
+                if !being_drawn
+                    && (!enabled_flags[n] || line_data.iter().all(|&x| x.abs() < 1e-10))
+                {
                     continue;
                 }
                 let color = crate::gui::harmonic_color(n);
                 let name = format!("Harmonic {}", n + 1);
 
-                let Some(audible) = &audible else {
+                // The curve under the pen is drawn whole and heavy: every
+                // bucket of it, whether or not it is loud enough for its phase
+                // to mean anything, because the user is looking at their own
+                // line and not at a measurement.
+                if being_drawn || audible.is_none() {
                     let points: PlotPoints = line_data
                         .iter()
                         .enumerate()
                         .map(|(i, &val)| [i as f64, (val * level(i)) as f64])
                         .collect();
-                    plot_ui.line(Line::new(points).color(color).name(name));
+                    let width = if being_drawn { 2.5 } else { 1.0 };
+                    plot_ui.line(Line::new(points).color(color).width(width).name(name));
                     continue;
-                };
+                }
+                let Some(audible) = &audible else { continue };
 
                 // Phase: only the audible buckets (a relative phase also needs
                 // the fundamental audible, or φ₁ is noise too), one line per run.
@@ -261,6 +367,23 @@ pub fn draw_harmonic_plot(
                 );
             }
 
+            // Where the pen stands: a line down the chart at its bucket, and
+            // the point it will draw from.
+            if let Some(pen) = drawing {
+                let (x, y) = (pen.x as f64, pen.y as f64);
+                plot_ui.line(
+                    Line::new(PlotPoints::from(vec![[x, y_min], [x, y_max]]))
+                        .color(egui::Color32::from_white_alpha(70))
+                        .name("Pen"),
+                );
+                plot_ui.points(
+                    Points::new(vec![[x, y]])
+                        .color(crate::gui::harmonic_color(pen.harmonic))
+                        .radius(if pen.down { 5.0 } else { 3.5 })
+                        .name("Pen"),
+                );
+            }
+
             // Pin both axes so the x-axis always spans the full bucket count,
             // even when every curve is skipped (all-zero, disabled or quiet)
             // and egui_plot has no data to auto-fit to. Derive the x-range from
@@ -279,6 +402,22 @@ pub fn draw_harmonic_plot(
                 [x_max, y_max],
             ));
         });
+
+    // A pen at the last bucket has drawn the whole curve.
+    if let Some(pen) = drawing {
+        if pen.finished(last_bucket) && !pen.down {
+            synth_compute_engine.commit_drawn();
+            drawing = None;
+        }
+    }
+    // Only this chart's own drawing is this chart's to change: the other
+    // chart sees `None` here for a session that is simply not its own.
+    if drawing != drawing_before {
+        set_draw_session(ui.ctx(), drawing);
+    }
+    if drawing.is_some() {
+        ui.ctx().request_repaint();
+    }
 }
 
 #[cfg(test)]

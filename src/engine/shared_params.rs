@@ -106,6 +106,15 @@ pub struct SharedParams {
     /// [`Self::analysis_amplitude_data`] / [`Self::analysis_phase_data`].
     pub harmonic_ampl_custom: Arc<Mutex<Vec<bool>>>,
     pub harmonic_phase_custom: Arc<Mutex<Vec<bool>>>,
+    /// Per-harmonic "this row is drawn by hand" flags (amplitude / phase,
+    /// independently). A drawn row is left alone by the Synth curves and by the
+    /// analysed snapshot alike: what the user drew on the chart is what plays.
+    pub harmonic_ampl_drawn: Arc<Mutex<Vec<bool>>>,
+    pub harmonic_phase_drawn: Arc<Mutex<Vec<bool>>>,
+    /// What was last drawn for each harmonic, kept while its row is switched to
+    /// another source so that switching back brings the drawing back.
+    pub drawn_amplitude_rows: Arc<Mutex<Vec<Option<Vec<f32>>>>>,
+    pub drawn_phase_rows: Arc<Mutex<Vec<Option<Vec<f32>>>>>,
     /// Pristine copy of the most recently loaded analysis grid, used to restore a
     /// harmonic's row when its "custom" override is switched back off.
     pub analysis_amplitude_data: Arc<Mutex<Vec<Vec<f32>>>>,
@@ -182,6 +191,10 @@ impl SharedParams {
             harmonic_phase_enabled: Arc::new(Mutex::new(vec![true; num_harmonics])),
             harmonic_ampl_custom: Arc::new(Mutex::new(vec![false; num_harmonics])),
             harmonic_phase_custom: Arc::new(Mutex::new(vec![false; num_harmonics])),
+            harmonic_ampl_drawn: Arc::new(Mutex::new(vec![false; num_harmonics])),
+            harmonic_phase_drawn: Arc::new(Mutex::new(vec![false; num_harmonics])),
+            drawn_amplitude_rows: Arc::new(Mutex::new(vec![None; num_harmonics])),
+            drawn_phase_rows: Arc::new(Mutex::new(vec![None; num_harmonics])),
             analysis_amplitude_data: Arc::new(Mutex::new(vec![vec![0.0; buckets]; num_harmonics])),
             analysis_phase_data: Arc::new(Mutex::new(vec![vec![0.0; buckets]; num_harmonics])),
             fade_duration: 128,
