@@ -15,8 +15,13 @@
 use std::sync::Arc;
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
 use crate::engine::SynthComputeEngine;
+use crate::modulation::Envelope;
 
-pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engine: &Arc<SynthComputeEngine>, window_width : f32, window_height : f32)  {
+pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engine: &Arc<SynthComputeEngine>, window_width : f32, window_height : f32, envelope: Option<Envelope>)  {
+    // `envelope`: draw the sound as a key held over the whole of it would play
+    // it through this envelope, with the envelope itself outlined around it.
+    let secs_per_sample = 1.0 / *synth_compute_engine.shared_params.sample_rate.lock().unwrap();
+    let level = |i: usize| envelope.map_or(1.0, |e| e.held_level(i as f32 * secs_per_sample));
     // Check if we should reset the view to default range (0-2000)
     let should_reset_view = synth_compute_engine
         .shared_params
@@ -54,7 +59,7 @@ pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engi
                 .iter()
                 .enumerate()
                 .step_by(stride)
-                .map(|(i, &sample)| [i as f64, sample as f64])
+                .map(|(i, &sample)| [i as f64, (sample * level(i)) as f64])
                 .collect();
 
             let bounds = plot_ui.plot_bounds();
@@ -81,6 +86,19 @@ pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engi
             }
 
             plot_ui.line(Line::new(points).name("Sound"));
+            if envelope.is_some() {
+                for sign in [1.0f32, -1.0] {
+                    let outline: PlotPoints = (0..assembled.len())
+                        .step_by(stride)
+                        .map(|i| [i as f64, (sign * level(i)) as f64])
+                        .collect();
+                    plot_ui.line(
+                        Line::new(outline)
+                            .color(crate::gui::ENVELOPE_COLOR)
+                            .name("Envelope"),
+                    );
+                }
+            }
         });
         
     // Clear the reset flag after use

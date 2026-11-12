@@ -30,6 +30,26 @@ pub struct LeSynthParams {
     #[id = "num_buckets"]
     pub num_buckets: IntParam,
 
+    // ── Modulation: the amplitude envelope (see `crate::modulation`) ──
+    #[id = "env_enabled"]
+    pub env_enabled: BoolParam,
+    #[id = "env_attack"]
+    pub env_attack: FloatParam,
+    #[id = "env_hold"]
+    pub env_hold: FloatParam,
+    #[id = "env_decay"]
+    pub env_decay: FloatParam,
+    #[id = "env_sustain"]
+    pub env_sustain: FloatParam,
+    #[id = "env_release"]
+    pub env_release: FloatParam,
+    #[id = "env_attack_curve"]
+    pub env_attack_curve: FloatParam,
+    #[id = "env_decay_curve"]
+    pub env_decay_curve: FloatParam,
+    #[id = "env_release_curve"]
+    pub env_release_curve: FloatParam,
+
     // Heap-allocated (not an inline `[HarmonicParam; NUM_HARMONICS]`): each
     // `HarmonicParam` is ~3 KB, so at NUM_HARMONICS = 256 an inline array makes
     // `LeSynthParams` ~700 KB and constructing it by value (default → Arc::new)
@@ -151,7 +171,39 @@ impl Default for LeSynthParams {
             }
         }).collect();
 
+        // Envelope times in milliseconds, skewed so the short end — where an
+        // attack is actually tuned — takes most of the slider's travel.
+        let env_time = |name: &str, default: f32, min: f32, max: f32| {
+            FloatParam::new(
+                name,
+                default,
+                FloatRange::Skewed { min, max, factor: FloatRange::skew_factor(-2.0) },
+            )
+            .with_unit(" ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(1))
+        };
+        let env_curve = |name: &str| {
+            FloatParam::new(name, 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
+                .with_value_to_string(formatters::v2s_f32_rounded(2))
+        };
+
         Self {
+            // Off by default: a voice then plays exactly as it did before the
+            // envelope existed.
+            env_enabled: BoolParam::new("Envelope Enabled", false),
+            env_attack: env_time("Envelope Attack", 10.0, 0.0, 10_000.0),
+            env_hold: env_time("Envelope Hold", 0.0, 0.0, 5_000.0),
+            env_decay: env_time("Envelope Decay", 200.0, 0.0, 10_000.0),
+            env_sustain: FloatParam::new(
+                "Envelope Sustain",
+                0.7,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            env_release: env_time("Envelope Release", 300.0, 1.0, 10_000.0),
+            env_attack_curve: env_curve("Envelope Attack Curve"),
+            env_decay_curve: env_curve("Envelope Decay Curve"),
+            env_release_curve: env_curve("Envelope Release Curve"),
             // These dimensions are overriden by actual window size
             editor_state: EguiState::from_size(1000, 1000),
             points_per_period: IntParam::new(

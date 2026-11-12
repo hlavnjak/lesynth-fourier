@@ -18,6 +18,7 @@ pub mod harmonic_plot;
 pub mod assembled_chart;
 pub mod curve_controls;
 pub mod metallic_background;
+pub mod modulation_controls;
 pub mod nested_fourier_controls;
 
 pub use analysis_controls::draw_analysis_controls;
@@ -26,6 +27,7 @@ pub use harmonic_plot::draw_harmonic_plot;
 pub use assembled_chart::draw_assembled_chart;
 pub use curve_controls::draw_curve_controls;
 pub use metallic_background::draw_metallic_background;
+pub use modulation_controls::{draw_modulation_controls, ENVELOPE_COLOR};
 pub use nested_fourier_controls::draw_nested_fourier_controls;
 
 use nih_plug_egui::egui;

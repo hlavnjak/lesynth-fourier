@@ -15,6 +15,7 @@
 mod constants;
 mod engine;
 mod gui;
+mod modulation;
 mod params;
 mod plugin;
 mod voice;

@@ -24,9 +24,14 @@ use nih_plug_egui::{
 use crate::constants::*;
 use crate::engine::shared_params::ORIGINAL_PITCH_VOICE;
 use crate::engine::{ChartType, ExecutionMode, SynthComputeEngine};
-use crate::gui::{draw_analysis_controls, draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_nested_fourier_controls, draw_piano_keyboard, draw_metallic_background, section, section_with_header};
+use crate::gui::{draw_analysis_controls, draw_assembled_chart, draw_curve_controls, draw_harmonic_plot, draw_nested_fourier_controls, draw_piano_keyboard, draw_metallic_background, draw_modulation_controls, section, section_with_header};
+use crate::modulation::Envelope;
 use crate::params::LeSynthParams;
 use crate::voice::Voice;
+
+/// Height the Modulation tab's caption, description and margins take above
+/// and around its sliders and envelope plot.
+const MODULATION_CHROME: f32 = 75.0;
 
 pub struct LeSynth {
     synth_params: Arc<LeSynthParams>,
@@ -109,6 +114,10 @@ impl Plugin for LeSynth {
         let keyboard_gain = shared.keyboard_gain();
         // Likewise a picker: one read for the whole block of events.
         let octave_shift = shared.keyboard_octave_shift();
+        // The amplitude envelope, `None` while it is switched off. Read once
+        // per block like the rest: its sliders are not sample-accurate.
+        let envelope = Envelope::from_params(&self.synth_params);
+        let secs_per_sample = 1.0 / *shared.sample_rate.lock().unwrap();
 
         // --- Handle incoming MIDI events (build/stop voices) ---
         // Wake the idle editor once after the batch if any voice changed.
@@ -129,14 +138,7 @@ impl Plugin for LeSynth {
                         // Get pre-computed buffer or compute synchronously as fallback
                         let buf = self.synth_compute_engine.get_buffer_for_key(key_idx);
                         let mut voices = shared.voices.lock().unwrap();
-                        voices[key_idx] = Some(Voice {
-                            buffer: buf,
-                            idx: 0,
-                            fade_in_active: true,
-                            fade_in_pos: 0,
-                            fade_out_active: false,
-                            fade_out_pos: 0,
-                        });
+                        voices[key_idx] = Some(Voice::new(buf));
                         voices_changed = true;
                     }
                 }
@@ -151,8 +153,7 @@ impl Plugin for LeSynth {
                     if key_idx < NUM_KEYS {
                         let mut voices = shared.voices.lock().unwrap();
                         if let Some(v) = voices[key_idx].as_mut() {
-                            v.fade_out_active = true;
-                            v.fade_out_pos = 0;
+                            v.release();
                         }
                         voices_changed = true;
                     }
@@ -210,6 +211,18 @@ impl Plugin for LeSynth {
                             v.fade_out_pos = 0;
                         }
 
+                        // The envelope follows the key, so it is not for the
+                        // Original Pitch And Gain audition, which has no key
+                        // and is compared against the source as it is.
+                        let envelope = envelope.filter(|_| slot != ORIGINAL_PITCH_VOICE);
+
+                        // A key that came back up: with no envelope to release
+                        // it, the short fade-out ends the note.
+                        if v.released && envelope.is_none() && !v.fade_out_active {
+                            v.fade_out_active = true;
+                            v.fade_out_pos = 0;
+                        }
+
                         let sample_idx = if repeat_playback {
                             v.idx % len
                         } else {
@@ -226,6 +239,24 @@ impl Plugin for LeSynth {
                         // reference every time the slider moved.
                         if slot != ORIGINAL_PITCH_VOICE {
                             s *= keyboard_gain;
+                        }
+
+                        // Envelope: attack, hold, decay and sustain run off the
+                        // time since the press; the release leaves from whatever
+                        // level that had reached and ends the voice.
+                        if let Some(env) = envelope {
+                            if v.released {
+                                let t = v.release_pos as f32 * secs_per_sample;
+                                if t >= env.release {
+                                    *opt = None;
+                                    continue;
+                                }
+                                s *= v.env_level * env.release_gain(t);
+                                v.release_pos += 1;
+                            } else {
+                                v.env_level = env.held_level(v.idx as f32 * secs_per_sample);
+                                s *= v.env_level;
+                            }
                         }
 
                         // Fade in
@@ -395,6 +426,13 @@ impl Plugin for LeSynth {
 
                             // ── Execution-mode switch ─────────────────────────────────
                             let mut mode = synth_compute_engine.shared_params.execution_mode();
+                            // Modulation is a third tab but not a third execution
+                            // mode: it leaves the grid, and whichever of Synth or
+                            // Analysis produces it, as they are.
+                            let modulation_tab_id = egui::Id::new("modulation_tab_open");
+                            let mut modulation_tab: bool = egui_ctx
+                                .memory(|m| m.data.get_temp(modulation_tab_id))
+                                .unwrap_or(false);
                             // The plugin's version, at the right end of the first
                             // section's caption row, so a user can tell which build
                             // a host loaded.
@@ -410,20 +448,46 @@ impl Plugin for LeSynth {
                             section_with_header(ui, "Mode", version_header, |ui| {
                                 ui.horizontal(|ui| {
                                     if ui
-                                        .selectable_label(mode == ExecutionMode::Synth, "Synth")
+                                        .selectable_label(!modulation_tab && mode == ExecutionMode::Synth, "Synth")
                                         .clicked()
                                     {
                                         mode = ExecutionMode::Synth;
+                                        modulation_tab = false;
                                     }
                                     if ui
-                                        .selectable_label(mode == ExecutionMode::Analysis, "Analysis")
+                                        .selectable_label(!modulation_tab && mode == ExecutionMode::Analysis, "Analysis")
                                         .clicked()
                                     {
                                         mode = ExecutionMode::Analysis;
+                                        modulation_tab = false;
+                                    }
+                                    let modulation_label = if synth_params.env_enabled.value() {
+                                        "Modulation (on)"
+                                    } else {
+                                        "Modulation"
+                                    };
+                                    if ui
+                                        .selectable_label(modulation_tab, modulation_label)
+                                        .on_hover_text(
+                                            "What is done to a key as it plays, on top of \
+                                             the Synth or Analysis grid",
+                                        )
+                                        .clicked()
+                                    {
+                                        modulation_tab = true;
                                     }
                                 });
                             });
                             synth_compute_engine.shared_params.set_execution_mode(mode);
+                            egui_ctx.memory_mut(|m| m.data.insert_temp(modulation_tab_id, modulation_tab));
+                            // On the Modulation tab the charts show the sound as
+                            // the envelope leaves it; on the other two, the grid
+                            // being edited.
+                            let chart_envelope = if modulation_tab {
+                                Envelope::from_params(&synth_params)
+                            } else {
+                                None
+                            };
                             ui.add_space(10.0);
 
                             // Analysed audio loaded? Then the grid resolution comes from the
@@ -464,13 +528,37 @@ impl Plugin for LeSynth {
 
                             // Keep original structure but make it responsive, wrapped
                             // in a consistent bordered section card.
-                            let editor_title = if mode == ExecutionMode::Synth {
+                            let editor_title = if modulation_tab {
+                                "Modulation"
+                            } else if mode == ExecutionMode::Synth {
                                 "Harmonic Editor"
                             } else {
                                 "Analysis"
                             };
                             section(ui, editor_title, |ui| {
-                            if mode == ExecutionMode::Synth {
+                            if modulation_tab {
+                                // Same fixed-height area as the other two tabs, so
+                                // the keyboard and charts below do not move.
+                                egui::ScrollArea::vertical()
+                                    .id_salt("modulation_controls")
+                                    .auto_shrink([false; 2])
+                                    .max_height(window_height * 0.24)
+                                    .max_width(content_w)
+                                    .show(ui, |ui| {
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(18, 25, 45))
+                                            .inner_margin(egui::Margin::same(6i8))
+                                            .show(ui, |ui| {
+                                                draw_modulation_controls(
+                                                    ui,
+                                                    &synth_params,
+                                                    setter,
+                                                    content_w - 12.0,
+                                                    window_height * 0.24 - MODULATION_CHROME,
+                                                );
+                                            });
+                                    });
+                            } else if mode == ExecutionMode::Synth {
                             // 256 rows of heavy controls, rebuilt every frame by an
                             // immediate-mode GUI, peg a CPU core even when idle. `show_rows`
                             // builds only what is scrolled into view; the uniform row height
@@ -748,7 +836,7 @@ impl Plugin for LeSynth {
                                     }
                                 }
                             };
-                            section_with_header(ui, "Live Harmonics", buckets_header, |ui| {
+                            section_with_header(ui, if chart_envelope.is_some() { "Live Harmonics (with envelope)" } else { "Live Harmonics" }, buckets_header, |ui| {
                                 let gutter = 10.0;
                                 let chart_w = (content_w - gutter) * 0.5;
                                 let chart_h = (window_height * 0.23).max(160.0);
@@ -784,6 +872,7 @@ impl Plugin for LeSynth {
                                             chart_w,
                                             chart_h,
                                             &synth_compute_engine,
+                                            chart_envelope,
                                         );
                                     },
                                 );
@@ -800,6 +889,7 @@ impl Plugin for LeSynth {
                                             right_w,
                                             chart_h,
                                             &synth_compute_engine,
+                                            chart_envelope,
                                         );
                                     },
                                 );
@@ -807,12 +897,13 @@ impl Plugin for LeSynth {
                             ui.add_space(10.0);
 
                             // ── Assembled sound ───────────────────────────────────────
-                            section(ui, "Assembled Sound", |ui| {
+                            section(ui, if chart_envelope.is_some() { "Assembled Sound (with envelope)" } else { "Assembled Sound" }, |ui| {
                                 draw_assembled_chart(
                                     ui,
                                     &synth_compute_engine,
                                     content_w,
                                     window_height,
+                                    chart_envelope,
                                 );
                             });
                         });

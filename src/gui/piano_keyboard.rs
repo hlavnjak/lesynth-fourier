@@ -556,8 +556,7 @@ pub fn draw_piano_keyboard(
             let shared = &synth_compute_engine.shared_params;
             let mut voices = shared.voices.lock().unwrap();
             if let Some(v) = voices[prev_key].as_mut() {
-                v.fade_out_active = true;
-                v.fade_out_pos = 0;
+                v.release();
             }
         }
         if Some(key_idx) != last_pressed_key {
@@ -566,14 +565,7 @@ pub fn draw_piano_keyboard(
                 let shared = &synth_compute_engine.shared_params;
                 let buf = synth_compute_engine.get_buffer_for_key(key_idx);
                 let mut voices = shared.voices.lock().unwrap();
-                voices[key_idx] = Some(Voice {
-                    buffer: buf,
-                    idx: 0,
-                    fade_in_active: true,
-                    fade_in_pos: 0,
-                    fade_out_active: false,
-                    fade_out_pos: 0,
-                });
+                voices[key_idx] = Some(Voice::new(buf));
             }
             synth_compute_engine.update_plotted_mix();
             last_pressed_key = Some(key_idx);
@@ -598,8 +590,7 @@ pub fn draw_piano_keyboard(
                 let shared = &synth_compute_engine.shared_params;
                 let mut voices = shared.voices.lock().unwrap();
                 if let Some(v) = voices[prev_key].as_mut() {
-                    v.fade_out_active = true;
-                    v.fade_out_pos = 0;
+                    v.release();
                 }
             }
 

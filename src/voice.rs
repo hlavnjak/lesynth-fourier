@@ -20,6 +20,15 @@ pub struct Voice {
     pub fade_in_pos: usize,
     pub fade_out_active: bool,
     pub fade_out_pos: usize,
+    /// The key has come back up. What that does to the sound is decided where
+    /// the voice is mixed: the envelope's release if one is on, else the short
+    /// fade-out.
+    pub released: bool,
+    /// Samples since the release, while the envelope's release stage runs.
+    pub release_pos: usize,
+    /// The envelope's level when it was last evaluated with the key down —
+    /// where a release starts from.
+    pub env_level: f32,
 }
 
 impl Voice {
@@ -31,7 +40,23 @@ impl Voice {
             fade_in_pos: 0,
             fade_out_active: false,
             fade_out_pos: 0,
+            released: false,
+            release_pos: 0,
+            env_level: 1.0,
         }
+    }
+
+    /// Note-off: the key came back up.
+    pub fn release(&mut self) {
+        if !self.released {
+            self.released = true;
+            self.release_pos = 0;
+        }
+    }
+
+    /// Still held: neither released nor being faded out.
+    pub fn is_held(&self) -> bool {
+        !self.released && !self.fade_out_active
     }
 
     pub fn is_fading(&self) -> bool {

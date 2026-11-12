@@ -17,6 +17,7 @@ use nih_plug_egui::egui::{self, RichText};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints, Points};
 use crate::constants::TWO_PI;
 use crate::engine::{ChartType, SynthComputeEngine};
+use crate::modulation::Envelope;
 
 /// A harmonic quieter than this fraction of its bucket's loudest harmonic
 /// (−40 dB) has no phase worth drawing: on a real recording it is analysis
@@ -88,6 +89,7 @@ pub fn draw_harmonic_plot(
     chart_w: f32,
     chart_h: f32,
     synth_compute_engine: &Arc<SynthComputeEngine>,
+    envelope: Option<Envelope>,
 ) {
     let is_amp = matches!(chart_type, ChartType::Amp);
 
@@ -162,6 +164,21 @@ pub fn draw_harmonic_plot(
         Some(audible_mask(&synth_compute_engine.shared_params.amplitude_data.lock().unwrap()))
     };
 
+    // `envelope`: draw each amplitude as a key held over the whole sound would
+    // play it through this envelope. A bucket's time is read off the preview
+    // key's buffer, the same one the Assembled Sound chart draws. Phase is not
+    // touched by an amplitude envelope.
+    let bucket_secs = {
+        let shared = &synth_compute_engine.shared_params;
+        let samples = shared.assembled_sound_plotted.lock().unwrap().len() as f32;
+        let buckets = shared.amplitude_data.lock().unwrap().iter().map(|d| d.len()).max().unwrap_or(0);
+        samples / *shared.sample_rate.lock().unwrap() / buckets.max(1) as f32
+    };
+    let level = |b: usize| match envelope {
+        Some(e) if is_amp => e.held_level(b as f32 * bucket_secs),
+        _ => 1.0,
+    };
+
     plot.show(ui, |plot_ui| {
             let (data, enabled_flags) = match chart_type {
                 ChartType::Amp => (
@@ -201,7 +218,7 @@ pub fn draw_harmonic_plot(
                     let points: PlotPoints = line_data
                         .iter()
                         .enumerate()
-                        .map(|(i, &val)| [i as f64, val as f64])
+                        .map(|(i, &val)| [i as f64, (val * level(i)) as f64])
                         .collect();
                     plot_ui.line(Line::new(points).color(color).name(name));
                     continue;
@@ -229,6 +246,19 @@ pub fn draw_harmonic_plot(
                         plot_ui.line(Line::new(PlotPoints::from(run)).color(color).name(&name));
                     }
                 }
+            }
+
+            // The envelope itself, scaled to the chart's height.
+            if is_amp && envelope.is_some() {
+                let buckets = data.iter().map(|d| d.len()).max().unwrap_or(0);
+                let outline: PlotPoints =
+                    (0..buckets).map(|b| [b as f64, level(b) as f64 * y_max]).collect();
+                plot_ui.line(
+                    Line::new(outline)
+                        .color(crate::gui::ENVELOPE_COLOR)
+                        .style(egui_plot::LineStyle::dashed_dense())
+                        .name("Envelope (scaled to the axis)"),
+                );
             }
 
             // Pin both axes so the x-axis always spans the full bucket count,
