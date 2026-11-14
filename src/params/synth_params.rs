@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
@@ -23,6 +24,19 @@ use super::{CurveType, GranularityLevel, HarmonicParam, NestedFourierState};
 pub struct LeSynthParams {
     #[persist = "editor-state"]
     pub editor_state: Arc<EguiState>,
+
+    /// The keyboard's "Zero phases on keys" checkbox. Not an automatable
+    /// parameter — it is a render setting, read by the engine through the same
+    /// `Arc` (see `SharedParams::zero_key_phases`) — but it changes how every
+    /// key sounds, so it is saved and restored with the rest of the state.
+    #[persist = "zero_key_phases"]
+    pub zero_key_phases: Arc<AtomicBool>,
+
+    /// The keyboard's "Repeat" checkbox — whether a held note loops. Saved
+    /// with the state for the same reason, and shared with the engine the same
+    /// way (`SharedParams::repeat_playback`).
+    #[persist = "repeat_playback"]
+    pub repeat_playback: Arc<AtomicBool>,
 
     #[id = "points_per_period"]
     pub points_per_period: IntParam,
@@ -188,6 +202,11 @@ impl Default for LeSynthParams {
         };
 
         Self {
+            // Off until the user asks for it; a state saved before this was
+            // kept has no entry and leaves it off.
+            zero_key_phases: Arc::new(AtomicBool::new(false)),
+            // Looping a held note is the default, as it always was.
+            repeat_playback: Arc::new(AtomicBool::new(true)),
             // Off by default: a voice then plays exactly as it did before the
             // envelope existed.
             env_enabled: BoolParam::new("Envelope Enabled", false),

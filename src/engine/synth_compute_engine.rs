@@ -1756,9 +1756,14 @@ pub struct SynthComputeEngine {
 impl SynthComputeEngine {
     pub fn new(synth_params_p: Arc<LeSynthParams>) -> Self {
         let buckets = NUM_OF_BUCKETS_DEFAULT;
+        // The keyboard settings that are saved with the plugin's state: share
+        // the persisted cells, so a restored state is what the engine reads.
+        let mut shared_params = SharedParams::new(NUM_HARMONICS, buckets);
+        shared_params.zero_key_phases = synth_params_p.zero_key_phases.clone();
+        shared_params.repeat_playback = synth_params_p.repeat_playback.clone();
         let engine = Self {
             synth_params: synth_params_p,
-            shared_params: Arc::new(SharedParams::new(NUM_HARMONICS, buckets)),
+            shared_params: Arc::new(shared_params),
             pending_analysis: Mutex::new(None),
             editor_ctx: Mutex::new(None),
             grid_is_loaded: AtomicBool::new(false),
@@ -4215,6 +4220,54 @@ mod tests {
             kept.iter().zip(&zeroed).all(|(a, b)| a == b),
             "the audition must be untouched by the keyboard's phase switch"
         );
+    }
+
+    /// The checkbox is part of the plugin's saved state: what one instance
+    /// serialises, another restores into the cell its renderer reads. Without
+    /// that a saved instrument came back with the phases on again.
+    #[test]
+    fn zero_key_phases_travels_with_the_plugin_state() {
+        use nih_plug::prelude::Params;
+
+        let saved = create_test_engine();
+        saved.shared_params.set_zero_key_phases(true);
+        let fields = saved.synth_params.serialize_fields();
+        assert!(fields.contains_key("zero_key_phases"), "the state must carry it");
+
+        let restored = create_test_engine();
+        assert!(!restored.shared_params.zero_key_phases());
+        restored.synth_params.deserialize_fields(&fields);
+        assert!(
+            restored.shared_params.zero_key_phases(),
+            "a restored state must reach the renderer, not just the params"
+        );
+
+        // A state saved before the checkbox was kept has no entry: off.
+        let mut old = fields.clone();
+        old.remove("zero_key_phases");
+        let legacy = create_test_engine();
+        legacy.synth_params.deserialize_fields(&old);
+        assert!(!legacy.shared_params.zero_key_phases());
+    }
+
+    /// The same for "Repeat", whose default is the other way round: on.
+    #[test]
+    fn repeat_playback_travels_with_the_plugin_state() {
+        use nih_plug::prelude::Params;
+
+        let saved = create_test_engine();
+        assert!(saved.shared_params.repeat_playback(), "looping is the default");
+        saved.shared_params.set_repeat_playback(false);
+        let mut fields = saved.synth_params.serialize_fields();
+
+        let restored = create_test_engine();
+        restored.synth_params.deserialize_fields(&fields);
+        assert!(!restored.shared_params.repeat_playback(), "play-once must come back");
+
+        fields.remove("repeat_playback");
+        let legacy = create_test_engine();
+        legacy.synth_params.deserialize_fields(&fields);
+        assert!(legacy.shared_params.repeat_playback(), "an older state keeps looping");
     }
 
     /// The switch is off until the user asks for it, in every mode — loading a
