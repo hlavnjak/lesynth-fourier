@@ -18,10 +18,20 @@ use crate::engine::SynthComputeEngine;
 use crate::modulation::Envelope;
 
 pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engine: &Arc<SynthComputeEngine>, window_width : f32, window_height : f32, envelope: Option<Envelope>)  {
-    // `envelope`: draw the sound as a key held over the whole of it would play
-    // it through this envelope, with the envelope itself outlined around it.
+    // `envelope`: draw the sound as one note would play it through this
+    // envelope — the key let go so that the release ends with the sound — with
+    // the envelope itself outlined around it.
     let secs_per_sample = 1.0 / *synth_compute_engine.shared_params.sample_rate.lock().unwrap();
-    let level = |i: usize| envelope.map_or(1.0, |e| e.held_level(i as f32 * secs_per_sample));
+    let total_secs = synth_compute_engine
+        .shared_params
+        .assembled_sound_plotted
+        .lock()
+        .unwrap()
+        .len() as f32
+        * secs_per_sample;
+    let level = |i: usize| {
+        envelope.map_or(1.0, |e| e.preview_level(i as f32 * secs_per_sample, total_secs))
+    };
     // Check if we should reset the view to default range (0-2000)
     let should_reset_view = synth_compute_engine
         .shared_params
@@ -86,7 +96,13 @@ pub fn draw_assembled_chart(ui: &mut nih_plug_egui::egui::Ui, synth_compute_engi
             }
 
             plot_ui.line(Line::new(points).name("Sound"));
-            if envelope.is_some() {
+            if let Some(e) = envelope {
+                plot_ui.vline(
+                    egui_plot::VLine::new((e.preview_gate(total_secs) / secs_per_sample) as f64)
+                        .color(nih_plug_egui::egui::Color32::from_gray(140))
+                        .style(egui_plot::LineStyle::dashed_dense())
+                        .name("Key released"),
+                );
                 for sign in [1.0f32, -1.0] {
                     let outline: PlotPoints = (0..assembled.len())
                         .step_by(stride)

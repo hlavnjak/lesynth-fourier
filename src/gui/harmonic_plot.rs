@@ -213,18 +213,20 @@ pub fn draw_harmonic_plot(
         Some(audible_mask(&synth_compute_engine.shared_params.amplitude_data.lock().unwrap()))
     };
 
-    // `envelope`: draw each amplitude as a key held over the whole sound would
-    // play it through this envelope. A bucket's time is read off the preview
+    // `envelope`: draw each amplitude as one note would play it through this
+    // envelope, the key let go so that the release ends with the sound. A
+    // bucket's time is read off the preview
     // key's buffer, the same one the Assembled Sound chart draws. Phase is not
     // touched by an amplitude envelope.
-    let bucket_secs = {
+    let (bucket_secs, total_secs) = {
         let shared = &synth_compute_engine.shared_params;
         let samples = shared.assembled_sound_plotted.lock().unwrap().len() as f32;
         let buckets = shared.amplitude_data.lock().unwrap().iter().map(|d| d.len()).max().unwrap_or(0);
-        samples / *shared.sample_rate.lock().unwrap() / buckets.max(1) as f32
+        let total = samples / *shared.sample_rate.lock().unwrap();
+        (total / buckets.max(1) as f32, total)
     };
     let level = |b: usize| match envelope {
-        Some(e) if is_amp => e.held_level(b as f32 * bucket_secs),
+        Some(e) if is_amp => e.preview_level(b as f32 * bucket_secs, total_secs),
         _ => 1.0,
     };
 
@@ -355,7 +357,15 @@ pub fn draw_harmonic_plot(
             }
 
             // The envelope itself, scaled to the chart's height.
-            if is_amp && envelope.is_some() {
+            if let (true, Some(e)) = (is_amp, envelope) {
+                if bucket_secs > 0.0 {
+                    plot_ui.vline(
+                        egui_plot::VLine::new((e.preview_gate(total_secs) / bucket_secs) as f64)
+                            .color(egui::Color32::from_gray(140))
+                            .style(egui_plot::LineStyle::dashed_dense())
+                            .name("Key released"),
+                    );
+                }
                 let buckets = data.iter().map(|d| d.len()).max().unwrap_or(0);
                 let outline: PlotPoints =
                     (0..buckets).map(|b| [b as f64, level(b) as f64 * y_max]).collect();

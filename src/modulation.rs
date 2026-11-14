@@ -102,6 +102,20 @@ impl Envelope {
         }
     }
 
+    /// When the charts that preview a whole sound of `total` seconds let the
+    /// key go: early enough that the release finishes as the sound does, so
+    /// the release and its curve are on screen with the other stages. A
+    /// release longer than half the sound still leaves the key held for the
+    /// first half, and is then cut off by the end of the chart.
+    pub fn preview_gate(&self, total: f32) -> f32 {
+        (total - self.release).max(total * 0.5)
+    }
+
+    /// The level `t` seconds into that preview — see [`Self::preview_gate`].
+    pub fn preview_level(&self, t: f32, total: f32) -> f32 {
+        self.level_at(t, self.preview_gate(total))
+    }
+
     /// Seconds from the press to the sustain level.
     pub fn time_to_sustain(&self) -> f32 {
         self.attack + self.hold + self.decay
@@ -123,6 +137,28 @@ fn bend(x: f32, curve: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The preview the Live Harmonics and Assembled Sound charts draw must
+    /// show the release: it ends at silence with the sound, and both the
+    /// release time and its curve move it.
+    #[test]
+    fn the_whole_sound_preview_shows_the_release() {
+        let e = env();
+        let total = 2.0;
+        assert!(e.preview_level(total, total) < 1e-6, "silent as the sound ends");
+        let mid_release = total - e.release * 0.5;
+        let level = e.preview_level(mid_release, total);
+        assert!(level > 0.0 && level < e.sustain, "part-way down mid-release");
+
+        let longer = Envelope { release: e.release * 2.0, ..e };
+        assert_ne!(longer.preview_level(mid_release, total), level, "release time shows");
+        let bent = Envelope { release_curve: 0.8, ..e };
+        assert_ne!(bent.preview_level(mid_release, total), level, "release curve shows");
+
+        // A release longer than the sound still leaves the key held first.
+        let endless = Envelope { release: 10.0, ..e };
+        assert_eq!(endless.preview_gate(total), 1.0);
+    }
 
     fn env() -> Envelope {
         Envelope {

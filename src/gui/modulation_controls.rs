@@ -60,7 +60,8 @@ pub fn draw_modulation_controls(
             "Applied to each key as it plays, on top of the harmonic grid: attack, hold \
              and decay run from the key press, release from the key coming back up. \
              The grid itself is not changed. While enabled, the charts below show the \
-             sound with the envelope applied, for a key held over the whole sound.",
+             sound with the envelope applied, for one note whose key is let go so that \
+             the release ends with the sound.",
         )
         .size(11.0)
         .color(Color32::from_gray(190)),
